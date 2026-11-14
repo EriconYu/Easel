@@ -1,4 +1,4 @@
-import { contextWorkbench, saveWorkbenchTask, type WorkbenchCard, type WorkbenchFormat } from './lib/api';
+import { contextWorkbench, fetchWorkbench, saveWorkbenchTask, type WorkbenchCard, type WorkbenchFormat, type WorkbenchTask } from './lib/api';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import type { Page } from './components/Sidebar';
@@ -586,15 +586,38 @@ export default function App() {
     sendUserAndStream(ns.id, prompt);
   }, [selectedPersona, sendUserAndStream]);
 
-  const handleGenerateWorkbench = useCallback(async (card:WorkbenchCard, format:WorkbenchFormat, platforms:string[]) => {
+  const handleGenerateWorkbench = useCallback(async (
+    card: Pick<WorkbenchCard, 'task_id' | 'title'>, format: WorkbenchFormat, platforms: string[],
+  ) => {
     const {context} = await contextWorkbench(selectedPersona, card.task_id, format, platforms);
-    const ns = createSession(selectedPersona || undefined);
+    const {tasks} = await fetchWorkbench(selectedPersona);
+    const sessionId = tasks.find(task => task.task_id === card.task_id)?.session_id;
+    const existing = sessionId ? sessionsRef.current.find(session => session.id === sessionId) : undefined;
+    // 本地记录缺失时仍沿用服务端 ID，让模型继续读取同一会话历史。
+    const ns: ChatSession = existing || (sessionId ? {
+      id: sessionId, persona: selectedPersona, title: card.title, messages: [], created: Date.now(),
+    } : createSession(selectedPersona || undefined));
+    if (streamCtl.current[ns.id] || streamAcc.current[ns.id]) {
+      setActiveSessionId(ns.id);
+      setCurrentPage('chat');
+      return;
+    }
     await saveWorkbenchTask(selectedPersona, {task_id:card.task_id, status:'doing', session_id:ns.id});
-    setSessions(prev => { const next=[ns,...prev]; saveSessions(next); return next; });
+    const next = [ns, ...sessionsRef.current.filter(session => session.id !== ns.id)];
+    sessionsRef.current = next;
+    setSessions(next);
+    saveSessions(next);
     setActiveSessionId(ns.id);
     setCurrentPage('chat');
-    sendUserAndStream(ns.id, `请为「${card.title}」生成${format}，适配${platforms.join('、')}。已附上画像、来源和制作简报。`, [], context);
+    const request = format === '讨论'
+      ? `${sessionId ? '继续讨论' : '讨论这个选题'}：「${card.title}」。请结合创作依据帮我梳理观点和角度。`
+      : `请为「${card.title}」生成${format}，适配${platforms.join('、')}。`;
+    sendUserAndStream(ns.id, request, [], context + '\n\n' + request);
   }, [selectedPersona, sendUserAndStream]);
+
+  const handleContinueWorkbench = useCallback(async (task: WorkbenchTask, format: WorkbenchFormat, platforms: string[]) => {
+    await handleGenerateWorkbench(task, format, platforms);
+  }, [handleGenerateWorkbench]);
 
   const handleStopStream = useCallback((sessionId: string) => {
     const pending = finalizers.current.get(sessionId);
@@ -760,6 +783,7 @@ export default function App() {
             onNavigate={setCurrentPage}
             onUseTopic={handleUseTopic}
             onGenerateWorkbench={handleGenerateWorkbench}
+            onContinueWorkbench={handleContinueWorkbench}
           />
         );
       case 'chat':

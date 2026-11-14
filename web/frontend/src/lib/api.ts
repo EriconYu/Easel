@@ -19,17 +19,56 @@ export class ApiError extends Error {
 }
 
 export interface WorkbenchSource { platform:string; url:string; published_at:string|null; fetched_at:string|null; evidence:string }
-export interface WorkbenchCard { task_id:string; title:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes:number; platforms:string[]; evergreen:boolean }
-export type WorkbenchFormat = '母稿'|'口播'|'平台稿';
+export interface WorkbenchCard { task_id:string; title:string; source_title?:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes:number; platforms:string[]; evergreen:boolean }
+export type WorkbenchFormat = '讨论'|'母稿'|'口播'|'平台稿';
 export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string }
-export interface WorkbenchResult { cards:WorkbenchCard[]; failures:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[] }
-export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[] }
+export interface WorkbenchResult { cards:WorkbenchCard[]; failures:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
+export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[]; days:1|3|7; include_search:boolean }
 const wbPost = <T,>(path:string, body:unknown):Promise<T> => request(`/api/workbench/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[]}>{return request(`/api/workbench/${encodeURIComponent(persona)}`)}
 export function recommendWorkbench(body:WorkbenchInput):Promise<WorkbenchResult>{return wbPost('recommend',body)}
 export function saveWorkbenchTask(persona:string,task:Partial<WorkbenchTask>&{task_id:string}):Promise<WorkbenchTask>{return wbPost('task',{persona,task})}
 export function dismissWorkbench(persona:string,task_id:string):Promise<{ok:boolean}>{return wbPost('feedback',{persona,task_id})}
 export function contextWorkbench(persona:string,task_id:string,format:WorkbenchFormat,platforms:string[]):Promise<{context:string}>{return wbPost('context',{persona,task_id,format,platforms})}
+
+export interface WorkbenchEvidence {
+  id: string; title: string; source: string; locator: string;
+  text: string; sha256: string; truncated?: boolean;
+}
+export interface WorkbenchBrief {
+  viewpoint: string;
+  skill_ids: string[];
+  document_ids: string[];
+  strict_mode: boolean;
+  allow_web: boolean;
+  reference_title: string;
+  reference_text: string;
+  evidence?: WorkbenchEvidence[];
+}
+export interface WorkbenchSkill { id: string; title: string; description: string; source: string }
+export interface WorkbenchDocument { id: string; title: string; type: string; source: string; available: boolean; reason?: string }
+export interface WorkbenchVersion {
+  id: string; name: string; text: string; path: string; created_at: string;
+  brief: WorkbenchBrief; evidence: WorkbenchEvidence[];
+}
+export function analyzeWorkbench(persona: string): Promise<WorkbenchResult> { return wbPost('analyze', {persona}); }
+export function fetchWorkbenchSkills(): Promise<{items: WorkbenchSkill[]}> { return request('/api/workbench/catalog/skills'); }
+export function fetchWorkbenchDocuments(): Promise<{items: WorkbenchDocument[]}> { return request('/api/workbench/catalog/documents'); }
+export function fetchWorkbenchBrief(persona: string, taskId: string): Promise<WorkbenchBrief> {
+  return request(`/api/workbench/brief/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+}
+export function saveWorkbenchBrief(persona: string, task_id: string, brief: WorkbenchBrief): Promise<WorkbenchBrief> {
+  const {viewpoint, skill_ids, document_ids, strict_mode, allow_web, reference_title, reference_text} = brief;
+  return wbPost('brief', {persona, task_id, brief: {
+    viewpoint, skill_ids, document_ids, strict_mode, allow_web, reference_title, reference_text,
+  }});
+}
+export function fetchWorkbenchVersions(persona: string, taskId: string): Promise<{items: WorkbenchVersion[]}> {
+  return request(`/api/workbench/versions/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+}
+export function saveWorkbenchVersion(persona: string, task_id: string, name: string, text: string): Promise<WorkbenchVersion> {
+  return wbPost('version', {persona, task_id, name, text});
+}
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   // 全部是动态应用接口（登录态/数据等），禁止浏览器 HTTP 缓存——否则 /api/accounts 等可能被启发式

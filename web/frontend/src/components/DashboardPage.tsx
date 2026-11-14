@@ -1,5 +1,5 @@
 import WorkbenchPanel from './WorkbenchPanel';
-import type { WorkbenchCard, WorkbenchFormat } from '../lib/api';
+import type { WorkbenchCard, WorkbenchFormat, WorkbenchTask } from '../lib/api';
 import { useState, useEffect, useRef } from 'react';
 import {
   fetchTrends, fetchSchedule, fetchOutputs, fetchAccounts, fetchIdeas,
@@ -39,12 +39,13 @@ interface DashboardProps {
   agentRuntime: string;
   onNavigate: (page: Page) => void;
   onUseTopic: (title: string) => void;
+  onContinueWorkbench: (task:WorkbenchTask, format:WorkbenchFormat, platforms:string[]) => Promise<void>;
   onGenerateWorkbench: (card:WorkbenchCard, format:WorkbenchFormat, platforms:string[]) => Promise<void>;
 }
 
 const STATUS_LABEL: Record<string, string> = { idea: '选题', draft: '草稿', scheduled: '待发', published: '已发' };
 
-export default function DashboardPage({ persona, gatewayStatus, apiDirect, agentRuntime, onNavigate, onUseTopic, onGenerateWorkbench }: DashboardProps) {
+export default function DashboardPage({ persona, gatewayStatus, apiDirect, agentRuntime, onNavigate, onUseTopic, onGenerateWorkbench, onContinueWorkbench }: DashboardProps) {
   const [trends, setTrends] = useState<TrendGroup[]>([]);
   const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
   const [outputs, setOutputs] = useState<OutputNode[]>([]);
@@ -183,7 +184,7 @@ export default function DashboardPage({ persona, gatewayStatus, apiDirect, agent
       </div>
 
       <div className="dash-grid">
-        <WorkbenchPanel key={persona} persona={persona} onGenerateWorkbench={onGenerateWorkbench} />
+        <WorkbenchPanel key={persona} persona={persona} onGenerateWorkbench={onGenerateWorkbench} onContinueWorkbench={onContinueWorkbench} onNavigate={onNavigate} />
         {/* 今日热点 */}
         <ContentPanel className="dash-card" label="今日热点列表" header={<div className="dash-card-head">
             <span><IconFire size={16} /> 今日热点</span>

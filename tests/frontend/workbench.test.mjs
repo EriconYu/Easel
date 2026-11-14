@@ -19,13 +19,13 @@ function harness(){
 test('刷新加载推荐与doing任务，生成按钮携带具体格式平台',async()=>{
  const h=harness();h.render();h.effects[0]();await new Promise(r=>setImmediate(r));let nodes=h.walk(h.render());
  assert.ok(nodes.some(n=>n.props?.children==='关系变化'));
- const button=nodes.find(n=>n.type==='button'&&Array.isArray(n.props.children)&&n.props.children.join('')==='生成口播');
- assert.ok(button);button.props.onClick();await new Promise(r=>setImmediate(r));
+ const discussion=nodes.find(n=>n.props?.taskId==='a'&&n.props.discussionLabel);
+ assert.ok(discussion);discussion.props.onAction('口播');await new Promise(r=>setImmediate(r));
  assert.equal(h.calls[0][0].task_id,'a');assert.equal(h.calls[0][1],'口播');assert.equal(h.calls[0][2][0],'公众号');
  assert.ok(nodes.some(n=>n.type==='select'&&n.props.name==='status'&&n.props.defaultValue==='doing'));
 });
 test('App生成流程等待任务绑定后发送完整上下文且不自动完成',()=>{
  const app=readFileSync(new URL('../../web/frontend/src/App.tsx',import.meta.url),'utf8');
  const block=app.slice(app.indexOf('const handleGenerateWorkbench'),app.indexOf('const handleStopStream'));
- assert.match(block,/await contextWorkbench/);assert.match(block,/createSession/);assert.match(block,/await saveWorkbenchTask[\s\S]*status:'doing'[\s\S]*session_id:ns.id/);assert.match(block,/sendUserAndStream\(ns.id,[\s\S]*\[\], context\)/);assert.ok(!block.includes("status:'done'"));
+ assert.match(block,/await contextWorkbench/);assert.match(block,/createSession/);assert.match(block,/await saveWorkbenchTask[\s\S]*status:'doing'[\s\S]*session_id:ns.id/);assert.match(block,/sendUserAndStream\(ns.id,[\s\S]*\[\], context/);assert.ok(!block.includes("status:'done'"));
 });

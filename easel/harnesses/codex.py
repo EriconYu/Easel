@@ -112,12 +112,14 @@ class CodexAdapter:
                     "clientInfo": {"name": "easel", "version": __version__},
                     "capabilities": {"experimentalApi": True}})
                 await rpc.send({"method": "initialized"})
-            options = {"cwd": str(request.cwd), "approvalPolicy": "on-request",
+            options: dict = {"cwd": str(request.cwd), "approvalPolicy": "on-request",
                        "sandbox": request.sandbox,
                        "developerInstructions": harness_instructions(request)}
+            if request.web_search is not None:
+                options['config'] = {'web_search': 'live' if request.web_search else 'disabled'}
             if request.model:
                 options["model"] = request.model
-            if thread_id and rpc.native_id == thread_id:
+            if thread_id and rpc.native_id == thread_id and request.web_search is None:
                 result = {"thread": {"id": thread_id}}
             elif thread_id:
                 result = await rpc.call("thread/resume", {**options, "threadId": thread_id})
@@ -136,6 +138,8 @@ class CodexAdapter:
                 "networkAccess": False}
             params = {"threadId": thread_id, "input": [{"type": "text", "text": request.prompt}],
                       "approvalPolicy": "on-request", "sandboxPolicy": policy}
+            if request.output_schema is not None:
+                params['outputSchema'] = request.output_schema
             if request.model:
                 params["model"] = request.model
             early: list[tuple[str, dict]] = []

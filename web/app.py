@@ -3222,9 +3222,14 @@ async def _run_harness_chat(req: ChatRequest, sk: str, message: str, runtime: st
         claimed = True
         env = {**read_settings(ENV_FILE), **_proxy_env(), "EASEL_AGENT_RUNTIME": runtime,
                "EASEL_ROOT": str(PROJECT_ROOT)}
+        web_policy = None
+        if req.persona:
+            from easel.workbench_evidence import session_web_policy
+            web_policy = session_web_policy(req.persona, sk)
         request = RunRequest(message, PROJECT_ROOT, env, native_id,
                              config["models"].get(runtime, ""), config["sandbox"], timeout,
-                             session_key=sk, codex_auto_approve=config.get("codex_auto_approve", False))
+                             session_key=sk, codex_auto_approve=config.get("codex_auto_approve", False),
+                             web_search=web_policy)
         await asyncio.wait_for(harnesses.adapter(runtime).run(
             request, receive, ask,
             lambda identifier: harness_store.bind(SESSIONS_DIR, sk, runtime, identifier)), timeout)
@@ -5613,6 +5618,8 @@ class WorkbenchRecommendRequest(BaseModel):
     exclude: list[str] = Field(default_factory=list, max_length=20)
     budget: int = 60
     platforms: list[str] = Field(default_factory=list, max_length=8)
+    days: int = Field(default=3, ge=1, le=7)
+    include_search: bool = False
 
 class WorkbenchTaskRequest(BaseModel):
     model_config = {"strict": True, "extra": "forbid"}
@@ -5625,14 +5632,90 @@ async def api_workbench_recommend(req: WorkbenchRecommendRequest):
         raise HTTPException(400, "无效或不存在的画像")
     try: workbench.validate_inputs(req.intent, req.exclude, req.budget, req.platforms)
     except ValueError as e: raise HTTPException(400, str(e)) from None
+    if req.days not in {1, 3, 7}:
+        raise HTTPException(400, '只支持最近1、3、7天')
     collection = await api_trends(limit=30)
     groups = list(collection.get("trends", []))
+    search_warnings = []
+    if req.include_search:
+        try:
+            from easel.workbench_search import search_topics
+            search_result = await search_topics(req.intent, days=req.days, limit=8)
+            search_warnings = search_result.get('warnings', [])
+            groups.append({'platform': '主动联网搜索', 'label': '主动联网搜索',
+                           'ok': bool(search_result.get('items')), 'items': search_result.get('items', []),
+                           'fetched_at': workbench.now(),
+                           'error': {'message': '；'.join(search_warnings) or '没有符合范围的搜索线索'}})
+        except Exception:
+            search_warnings = ['搜索底座调用失败，未伪造搜索结果']
+            groups.append({'platform': '主动联网搜索', 'ok': False, 'error': {'message': search_warnings[0]}})
     for warning in collection.get("warnings", []):
         groups.append({"platform": "数据源配置", "ok": False, "error": {"message": str(warning)}})
     if not groups:
         groups.append({"platform": "热点采集", "ok": False, "error": {"message": "当前没有启用的数据源，仅能提供常青候选"}})
     try:
-        return await asyncio.to_thread(workbench.recommend, req.persona, req.intent, req.exclude, req.budget, req.platforms, groups)
+        return await asyncio.to_thread(workbench.recommend, req.persona, req.intent, req.exclude, req.budget, req.platforms, groups, days=req.days, include_search=req.include_search, search_warnings=search_warnings)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+
+class WorkbenchAnalysisRequest(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    persona: str
+
+
+@app.post('/api/workbench/analyze')
+async def api_workbench_analyze(req: WorkbenchAnalysisRequest):
+    from easel.workbench_analysis import analyze_topics
+    try:
+        return await analyze_topics(req.persona, PROJECT_ROOT, read_settings(ENV_FILE))
+    except (ValueError, HarnessError) as error:
+        raise HTTPException(400, str(error)) from None
+
+
+class WorkbenchBriefRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task_id: str
+    brief: dict
+
+@app.get("/api/workbench/catalog/documents")
+async def api_workbench_documents():
+    return {"items": await asyncio.to_thread(workbench.catalog_documents)}
+
+@app.get("/api/workbench/catalog/document/{document_id}")
+async def api_workbench_document(document_id: str):
+    try: return await asyncio.to_thread(workbench.read_document, document_id)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.get("/api/workbench/catalog/skills")
+async def api_workbench_skills():
+    return {"items": await asyncio.to_thread(workbench.catalog_skills)}
+
+@app.get("/api/workbench/brief/{persona}/{task_id}")
+async def api_workbench_brief(persona: str, task_id: str):
+    try: return await asyncio.to_thread(workbench.load_brief, persona, task_id)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.post("/api/workbench/brief")
+async def api_workbench_brief_save(req: WorkbenchBriefRequest):
+    try: return await asyncio.to_thread(workbench.save_brief, req.persona, req.task_id, req.brief)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+class WorkbenchVersionRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task_id: str
+    name: str
+    text: str
+
+@app.get("/api/workbench/versions/{persona}/{task_id}")
+async def api_workbench_versions(persona: str, task_id: str):
+    try: return {"items": await asyncio.to_thread(workbench.list_versions, persona, task_id)}
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.post("/api/workbench/version")
+async def api_workbench_version(req: WorkbenchVersionRequest):
+    try: return await asyncio.to_thread(workbench.save_version, req.persona, req.task_id, req.name, req.text)
     except ValueError as e: raise HTTPException(400, str(e)) from None
 
 @app.get("/api/workbench/{persona}")
