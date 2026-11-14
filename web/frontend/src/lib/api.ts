@@ -18,6 +18,19 @@ export class ApiError extends Error {
   }
 }
 
+export interface WorkbenchSource { platform:string; url:string; published_at:string|null; fetched_at:string|null; evidence:string }
+export interface WorkbenchCard { task_id:string; title:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes:number; platforms:string[]; evergreen:boolean }
+export type WorkbenchFormat = '母稿'|'口播'|'平台稿';
+export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string }
+export interface WorkbenchResult { cards:WorkbenchCard[]; failures:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[] }
+export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[] }
+const wbPost = <T,>(path:string, body:unknown):Promise<T> => request(`/api/workbench/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[]}>{return request(`/api/workbench/${encodeURIComponent(persona)}`)}
+export function recommendWorkbench(body:WorkbenchInput):Promise<WorkbenchResult>{return wbPost('recommend',body)}
+export function saveWorkbenchTask(persona:string,task:Partial<WorkbenchTask>&{task_id:string}):Promise<WorkbenchTask>{return wbPost('task',{persona,task})}
+export function dismissWorkbench(persona:string,task_id:string):Promise<{ok:boolean}>{return wbPost('feedback',{persona,task_id})}
+export function contextWorkbench(persona:string,task_id:string,format:WorkbenchFormat,platforms:string[]):Promise<{context:string}>{return wbPost('context',{persona,task_id,format,platforms})}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   // 全部是动态应用接口（登录态/数据等），禁止浏览器 HTTP 缓存——否则 /api/accounts 等可能被启发式
   // 缓存住旧响应（曾表现为“扫码登录后卡片仍显示未登录”）。调用方可用 options.cache 覆盖。

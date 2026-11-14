@@ -23,7 +23,7 @@ const PLATFORMS: { key: string; label: string; titleLimit?: number; bodyLimit: n
   { key: 'juejin', label: '掘金', titleLimit: 100, bodyLimit: 20000, hint: '技术文章（Markdown），标题≤100；发布默认分类，标签需掘金已有标签' },
   { key: 'bilibili', label: 'B站', titleLimit: 80, bodyLimit: 2000, hint: '需附视频，标题≤80、简介≤2000，默认投「知识」分区' },
   { key: 'toutiao', label: '今日头条', titleLimit: 30, bodyLimit: 10000, draft: true, hint: '图文长文，标题≤30 字，话题≤5 个；附件图片插进正文，可存草稿' },
-  { key: 'wechat-oa', label: '公众号', titleLimit: 64, bodyLimit: 20000, hint: '图文文章，正文用 Markdown，首图作封面，发到草稿箱；需先在账号页「登录公众号后台」扫码' },
+  { key: 'wechat-oa', label: '公众号', titleLimit: 64, bodyLimit: 20000, hint: '图文文章将送入公众号草稿箱；首图作封面，需先在账号页「登录公众号后台」扫码' },
   { key: 'twitter-x', label: '推特 X', bodyLimit: 280, hint: '标题与正文合并，最终长度以 X 校验为准；可附 1 图或 1 视频；窗口登录需要运行 Easel 的电脑有图形桌面及外网连接' },
 ];
 const LABEL2KEY = Object.fromEntries(PLATFORMS.map((p) => [p.label, p.key]));
@@ -54,6 +54,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
   const [tags, setTags] = useState(draft0.tags || '');
   // 存草稿模式：只对声明了 draft 能力的平台（今日头条）生效，其余平台仍真发布
   const [asDraft, setAsDraft] = useState(false);
+  // 公众号调用链仍由后端决定；这里仅明确展示其草稿箱结果。
   const [editing, setEditing] = useState<string | null>(null);
   const [copied, setCopied] = useState('');
   const [toast, setToast] = useState('');
@@ -249,7 +250,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
           setPub((r) => ({
             ...r,
             [t.key]: res.ok
-              ? { status: 'ok', msg: asDraftThis ? '已存草稿 ✅' : '已发布 ✅' }
+              ? { status: 'ok', msg: t.key === 'wechat-oa' ? '草稿创建成功，已送入公众号草稿箱 ✅' : (asDraftThis ? '已存草稿 ✅' : '已发布 ✅') }
               : { status: 'fail', msg: res.detail || res.message || '发布失败' },
           }));
         }
@@ -278,7 +279,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
         setPub((r) => ({ ...r, [key]: { status: 'publishing', msg: s.message || '需短信验证' } }));
       } else if (s.state === 'success') {
         clearInterval(iv); pollTimers.current.delete(iv); setPubSms(null);
-        setPub((r) => ({ ...r, [key]: { status: 'ok', msg: '已发布 ✅' } }));
+        setPub((r) => ({ ...r, [key]: { status: 'ok', msg: key === 'wechat-oa' ? '草稿创建成功，已送入公众号草稿箱 ✅' : '已发布 ✅' } }));
         resolve();
       } else if (s.state === 'error') {
         clearInterval(iv); pollTimers.current.delete(iv); setPubSms(null);

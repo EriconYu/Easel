@@ -5529,6 +5529,7 @@ from easel.trends.sources import ConfigError as TrendConfigError, load_sources a
 from easel.trends import management as trend_management
 from easel.trends.protocol import CollectorError as TrendCollectorError, safe_json as trend_safe_json
 from easel.trends.protocol import MAX_MANAGEMENT_BYTES
+from easel import workbench
 
 _TREND_SERVICE = TrendService()
 
@@ -5604,6 +5605,67 @@ async def api_trends(platforms: str | None = None, limit: int = 12):
     groups = [result if isinstance(result, dict) else trend_failure_group(registry[identifier])
               for identifier, result in zip(selected, results)]
     return {"version": 1, "trends": groups, "updated": int(time.time()), "warnings": warnings}
+
+class WorkbenchRecommendRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    intent: str = Field(min_length=1, max_length=500)
+    exclude: list[str] = Field(default_factory=list, max_length=20)
+    budget: int = 60
+    platforms: list[str] = Field(default_factory=list, max_length=8)
+
+class WorkbenchTaskRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task: dict
+
+@app.post("/api/workbench/recommend")
+async def api_workbench_recommend(req: WorkbenchRecommendRequest):
+    if not valid_persona_name(req.persona) or not profile_exists(req.persona):
+        raise HTTPException(400, "无效或不存在的画像")
+    try: workbench.validate_inputs(req.intent, req.exclude, req.budget, req.platforms)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+    collection = await api_trends(limit=30)
+    groups = list(collection.get("trends", []))
+    for warning in collection.get("warnings", []):
+        groups.append({"platform": "数据源配置", "ok": False, "error": {"message": str(warning)}})
+    if not groups:
+        groups.append({"platform": "热点采集", "ok": False, "error": {"message": "当前没有启用的数据源，仅能提供常青候选"}})
+    try:
+        return await asyncio.to_thread(workbench.recommend, req.persona, req.intent, req.exclude, req.budget, req.platforms, groups)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.get("/api/workbench/{persona}")
+async def api_workbench_get(persona: str):
+    try: return workbench.snapshot(persona)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.post("/api/workbench/task")
+async def api_workbench_task(req: WorkbenchTaskRequest):
+    try: return await asyncio.to_thread(workbench.save_task, req.persona, req.task)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+class WorkbenchContextRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task_id: str
+    format: str
+    platforms: list[str]
+
+class WorkbenchFeedbackRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task_id: str
+
+@app.post("/api/workbench/feedback")
+async def api_workbench_feedback(req: WorkbenchFeedbackRequest):
+    try: return workbench.dismiss(req.persona, req.task_id)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.post("/api/workbench/context")
+async def api_workbench_context(req: WorkbenchContextRequest):
+    try: return {"context": workbench.generation_context(req.persona, req.task_id, req.format, req.platforms)}
+    except ValueError as e: raise HTTPException(400, str(e)) from None
 
 
 SCHEDULE_FILE = OUTPUTS_DIR / "_schedule.json"

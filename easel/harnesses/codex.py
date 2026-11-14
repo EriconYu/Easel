@@ -12,6 +12,19 @@ from .rpc import connection
 from .workspace import harness_instructions
 
 
+def output_write_roots(cwd):
+    """Keep writes scoped to the workspace and its configured content store."""
+    root = cwd.resolve()
+    roots = [str(root)]
+    output = root / "outputs"
+    if output.is_dir():
+        target = output.resolve()
+        # Never turn an accidental link to /, home, or another ancestor into a grant.
+        if target != root and target not in root.parents and root not in target.parents:
+            roots.append(str(target))
+    return roots
+
+
 class CodexAdapter:
     descriptor = Descriptor("codex", "Codex", "app-server", "npm install -g @openai/codex；codex login")
 
@@ -119,7 +132,7 @@ class CodexAdapter:
             bind(thread_id)
             rpc.native_id = thread_id
             policy = {"type": "readOnly"} if request.sandbox == "read-only" else {
-                "type": "workspaceWrite", "writableRoots": [str(request.cwd)],
+                "type": "workspaceWrite", "writableRoots": output_write_roots(request.cwd),
                 "networkAccess": False}
             params = {"threadId": thread_id, "input": [{"type": "text", "text": request.prompt}],
                       "approvalPolicy": "on-request", "sandboxPolicy": policy}

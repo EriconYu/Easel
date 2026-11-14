@@ -1,3 +1,5 @@
+import WorkbenchPanel from './WorkbenchPanel';
+import type { WorkbenchCard, WorkbenchFormat } from '../lib/api';
 import { useState, useEffect, useRef } from 'react';
 import {
   fetchTrends, fetchSchedule, fetchOutputs, fetchAccounts, fetchIdeas,
@@ -37,11 +39,12 @@ interface DashboardProps {
   agentRuntime: string;
   onNavigate: (page: Page) => void;
   onUseTopic: (title: string) => void;
+  onGenerateWorkbench: (card:WorkbenchCard, format:WorkbenchFormat, platforms:string[]) => Promise<void>;
 }
 
 const STATUS_LABEL: Record<string, string> = { idea: '选题', draft: '草稿', scheduled: '待发', published: '已发' };
 
-export default function DashboardPage({ persona, gatewayStatus, apiDirect, agentRuntime, onNavigate, onUseTopic }: DashboardProps) {
+export default function DashboardPage({ persona, gatewayStatus, apiDirect, agentRuntime, onNavigate, onUseTopic, onGenerateWorkbench }: DashboardProps) {
   const [trends, setTrends] = useState<TrendGroup[]>([]);
   const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
   const [outputs, setOutputs] = useState<OutputNode[]>([]);
@@ -129,6 +132,7 @@ export default function DashboardPage({ persona, gatewayStatus, apiDirect, agent
   const pendingIdeas = ideas.filter((i) => i.status === 'pending');
   const loggedIn = accounts.filter((a) => a.loggedIn).length;
 
+
   const quick: { label: string; page: Page; Icon: typeof IconChat }[] = [
     { label: '开始对话', page: 'chat', Icon: IconChat },
     { label: '看热点', page: 'trends', Icon: IconFire },
@@ -179,6 +183,7 @@ export default function DashboardPage({ persona, gatewayStatus, apiDirect, agent
       </div>
 
       <div className="dash-grid">
+        <WorkbenchPanel key={persona} persona={persona} onGenerateWorkbench={onGenerateWorkbench} />
         {/* 今日热点 */}
         <ContentPanel className="dash-card" label="今日热点列表" header={<div className="dash-card-head">
             <span><IconFire size={16} /> 今日热点</span>

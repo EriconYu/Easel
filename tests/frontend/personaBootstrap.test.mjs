@@ -30,7 +30,8 @@ const deferred = () => {
 };
 const settle = () => new Promise(resolve => setImmediate(resolve));
 function setup() {
-  const status = deferred(), requests = [], lists = [], cleanups = [], recommended = [];
+  const status = deferred(), requests = [], lists = [], cleanups = [], recommended = [], selections = [];
+  let selectedPersona = '';
   const control = runInNewContext(outputText, {
     useRef: initial => ({ current: initial }), useCallback: fn => fn,
     useEffect: fn => { const cleanup = fn(); if (cleanup) cleanups.push(cleanup); },
@@ -38,12 +39,13 @@ function setup() {
     fetchPersonas: () => { const request = deferred(); requests.push(request); return request.promise; },
     fetch: async () => ({ ok: true, json: async () => ({ modelConfigured: true }) }),
     setPersonas: list => lists.push(JSON.parse(JSON.stringify(list))),
+    setSelectedPersona: update => { selectedPersona = update(selectedPersona); selections.push(selectedPersona); },
     setPersonasLoaded: () => {}, parsePersonas: personaHelpers.parsePersonas,
     setGatewayStatus: () => {}, setApiDirect: () => {}, setAgentRuntime: () => {},
     setNeedModelSetup: () => {}, setSettingsOpen: () => {}, setShowRecommend: value => recommended.push(value),
     onboardingSeen: () => false,
   });
-  return { status, requests, lists, cleanups, recommended, ...control };
+  return { status, requests, lists, cleanups, recommended, selections, ...control };
 }
 const profile = [{ name: 'existing profile', description: 'test' }];
 const statusData = { gateway: true, runtime: 'api', transport: 'api', personas: [] };

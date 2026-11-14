@@ -1,3 +1,4 @@
+import { contextWorkbench, saveWorkbenchTask, type WorkbenchCard, type WorkbenchFormat } from './lib/api';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import type { Page } from './components/Sidebar';
@@ -55,6 +56,8 @@ export default function App() {
     const list = await fetchPersonas();
     if (personaRequestId.current !== id) return null;
     setPersonas(list);
+    // 个人工作台只有一个画像时直接使用，无需用户先去对话页选择。
+    setSelectedPersona((current) => current || (list.length === 1 ? list[0].name : ''));
     setPersonasLoaded(true);
     return list;
   }, []);
@@ -583,6 +586,16 @@ export default function App() {
     sendUserAndStream(ns.id, prompt);
   }, [selectedPersona, sendUserAndStream]);
 
+  const handleGenerateWorkbench = useCallback(async (card:WorkbenchCard, format:WorkbenchFormat, platforms:string[]) => {
+    const {context} = await contextWorkbench(selectedPersona, card.task_id, format, platforms);
+    const ns = createSession(selectedPersona || undefined);
+    await saveWorkbenchTask(selectedPersona, {task_id:card.task_id, status:'doing', session_id:ns.id});
+    setSessions(prev => { const next=[ns,...prev]; saveSessions(next); return next; });
+    setActiveSessionId(ns.id);
+    setCurrentPage('chat');
+    sendUserAndStream(ns.id, `请为「${card.title}」生成${format}，适配${platforms.join('、')}。已附上画像、来源和制作简报。`, [], context);
+  }, [selectedPersona, sendUserAndStream]);
+
   const handleStopStream = useCallback((sessionId: string) => {
     const pending = finalizers.current.get(sessionId);
     if (pending) { pending.finish(); return; }
@@ -746,6 +759,7 @@ export default function App() {
             agentRuntime={agentRuntime}
             onNavigate={setCurrentPage}
             onUseTopic={handleUseTopic}
+            onGenerateWorkbench={handleGenerateWorkbench}
           />
         );
       case 'chat':
