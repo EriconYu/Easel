@@ -16,6 +16,50 @@ def client(tmp_path,monkeypatch):
     monkeypatch.setattr(web,'api_trends',trends)
     return TestClient(web.app,base_url='http://localhost',headers={'origin':next(iter(web._LOCAL_ORIGINS))})
 
+def test_recommend_waits_for_inflight_source(client, monkeypatch):
+    calls = []
+    async def trends(**kwargs):
+        calls.append(kwargs)
+        busy = {'platform': 'weibo', 'ok': False, 'items': [], 'error': {'code': 'busy', 'message': '采集中'}}
+        ready = {'platform': 'weibo', 'ok': True, 'items': [{'title': '关系与沟通', 'url': 'https://example.com/topic'}]}
+        return {'trends': [busy if len(calls) == 1 else ready]}
+    monkeypatch.setattr(web, 'api_trends', trends)
+    res = client.post('/api/workbench/recommend', json={'persona': '测试', 'intent': '关系', 'budget': 30})
+    assert res.status_code == 200
+    assert len(calls) == 2
+    assert res.json()['cards'][0]['sources'][0]['platform'] == 'weibo'
+
+
+def test_busy_sources_are_pending_not_failed(client):
+    group = {'platform': 'weibo', 'ok': False, 'items': [], 'error': {'code': 'busy', 'message': '采集中'}}
+    value = w.recommend('测试', '关系', [], 30, ['公众号'], [group])
+    assert value['failures'] == []
+    assert value['pending_sources'] == ['weibo']
+
+
+def test_permanent_source_error_is_not_retried_or_hidden(client, monkeypatch):
+    calls = []
+    async def trends(**kwargs):
+        calls.append(kwargs)
+        return {'trends': [{'platform': 'weibo', 'ok': False, 'items': [], 'error': {'code': 'process_failed', 'message': '执行失败'}}]}
+    monkeypatch.setattr(web, 'api_trends', trends)
+    res = client.post('/api/workbench/recommend', json={'persona': '测试', 'intent': '关系', 'budget': 30})
+    assert len(calls) == 1
+    assert res.json()['failures'] == ['weibo：执行失败']
+
+
+def test_busy_wait_budget_keeps_pending_without_false_failure(client, monkeypatch):
+    import easel.timeouts as budgets
+    monkeypatch.setattr(budgets, 'TIMEOUT_TREND_COLLECT', 0)
+    monkeypatch.setattr(budgets, 'TIMEOUT_TREND_STARTUP', 0)
+    async def trends(**kwargs):
+        return {'trends': [{'platform': 'weibo', 'ok': False, 'items': [], 'error': {'code': 'busy'}}]}
+    monkeypatch.setattr(web, 'api_trends', trends)
+    res = client.post('/api/workbench/recommend', json={'persona': '测试', 'intent': '关系', 'budget': 30})
+    assert res.json()['failures'] == []
+    assert res.json()['pending_sources'] == ['weibo']
+
+
 def test_refresh_context_and_guard(client):
     body={'persona':'测试','intent':'关系','budget':30,'platforms':['公众号']}
     r=client.post('/api/workbench/recommend',json=body);assert r.status_code==200,r.text

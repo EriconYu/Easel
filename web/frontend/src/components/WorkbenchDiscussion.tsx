@@ -2,9 +2,12 @@ import { useEffect, useState } from 'react';
 import {
   fetchWorkbenchBrief, saveWorkbenchBrief, fetchWorkbenchSkills, fetchWorkbenchDocuments,
   fetchWorkbenchVersions, saveWorkbenchVersion, fetchLastTurn, fetchWorkbench,
+  fetchTaskInspiration, saveTaskInspiration,
 } from '../lib/api';
 import type { WorkbenchBrief, WorkbenchSkill, WorkbenchDocument, WorkbenchVersion, WorkbenchFormat } from '../lib/api';
 import type { Page } from './Sidebar';
+import type { TaskInspiration } from '../lib/api';
+import InspirationPicker from './InspirationPicker';
 
 export interface WorkbenchDiscussionProps {
   persona: string;
@@ -28,13 +31,16 @@ export function DiscussionEditor({ persona, taskId, onAction, onNavigate, discus
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [inspiration, setInspiration] = useState<TaskInspiration | null>(null);
 
   useEffect(() => {
     let active = true;
+    setInspiration(null);
     Promise.all([fetchWorkbenchBrief(persona, taskId), fetchWorkbenchSkills(),
-      fetchWorkbenchDocuments(), fetchWorkbenchVersions(persona, taskId)])
-      .then(([value, skillList, documentList, versionList]) => {
+      fetchWorkbenchDocuments(), fetchWorkbenchVersions(persona, taskId), fetchTaskInspiration(persona, taskId)])
+      .then(([value, skillList, documentList, versionList, adopted]) => {
         if (!active) return;
+        setInspiration(adopted);
         setBrief(value);
         setSkills(skillList.items);
         setDocuments(documentList.items);
@@ -62,7 +68,10 @@ export function DiscussionEditor({ persona, taskId, onAction, onNavigate, discus
     if (!brief) throw new Error('请等待依据加载完成');
     const saved = await saveWorkbenchBrief(persona, taskId, brief);
     setBrief(saved);
-    setNotice('创作依据已保存，所选真实片段会自动加入模型上下文。');
+    if (!inspiration) throw new Error('请等待个人灵感引用加载完成');
+    const adopted = await saveTaskInspiration(persona, taskId, inspiration.enabled, inspiration.references);
+    setInspiration(adopted);
+    setNotice('创作依据已保存，所选真实片段和个人灵感会自动加入模型上下文。');
   };
   const act = (format: WorkbenchFormat) => run(async () => {
     await save();
@@ -74,6 +83,7 @@ export function DiscussionEditor({ persona, taskId, onAction, onNavigate, discus
     if (!sessionId) throw new Error('此任务还没有对话稿，请先讨论或生成。');
     const last = await fetchLastTurn(sessionId);
     if (last.status === 'running') { setNotice('对话尚未结束，请结束后再取回稿件。'); return; }
+    if (last.status !== 'done' || last.clean_end === false || last.stop_reason === 'error') throw new Error('本轮生成失败，不能作为稿件取回；请修正模型配置或重试。');
     if (!last.text?.trim()) throw new Error('最近对话没有可取回的稿件。');
     const body = last.text.match(/【正文开始】\s*([\s\S]*?)\s*【正文结束】/);
     setText(body ? body[1] : last.text);
@@ -86,6 +96,11 @@ export function DiscussionEditor({ persona, taskId, onAction, onNavigate, discus
     {busy && <p role="status">加载或保存中…</p>}
     {notice && <p role="status">{notice}</p>}
     {brief && <fieldset disabled={busy} className="workbench-content">
+      {inspiration && <details className="workbench-inspiration"><summary>个人灵感与好稿复用（可选）</summary>
+        <InspirationPicker persona={persona} exclude={inspiration.exclude} enabled={inspiration.enabled}
+          selected={inspiration.references} onChange={(enabled, references) => setInspiration({...inspiration, enabled, references})} />
+        <p>只有保存后才采用所选内容；它们作为个人原话或经验，不等于外部事实证据。</p>
+      </details>}
       <label>我的观点<textarea aria-label="我的观点" value={brief.viewpoint} onChange={e => update({viewpoint: e.target.value})} /></label>
       <p>勾选的技能与资料片段会发送给当前模型；保存后自动附入上下文，无需复制。目录只显示摘要，不默认加载全文。</p>
       <label>搜索技能<input aria-label="搜索技能" value={skillFilter} onChange={e => setSkillFilter(e.target.value)} /></label>

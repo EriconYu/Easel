@@ -85,8 +85,9 @@ export default function AccountsPage() {
             account.platform === platform ? { ...account, loggedIn: r.loggedIn } : account));
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (aliveRef.current && whoamiRequests.current[platform] === sequence) {
+          if (platform === 'xiaohongshu') setErr(error instanceof Error ? error.message : '无法校验手动 Chrome 会话，请重新打开手动会话');
           setWhoami((previous) => {
             const updated = { ...previous };
             const cached = getWhoamiCache()[platform];
@@ -211,7 +212,7 @@ export default function AccountsPage() {
     }
   }, [cred, credForm, runWhoami, closeCred]);
 
-  const handleLogin = useCallback(async (a: AccountItem) => {
+  const handleLogin = useCallback(async (a: AccountItem, manual = false) => {
     if (!a.supported) return;
     if (a.backend === 'wechat-oa') { openCred(a); return; }   // 公众号走凭证表单，不扫码
     const sequence = ++qrRequest.current;
@@ -225,9 +226,11 @@ export default function AccountsPage() {
     qrPlatformRef.current = a.platform;
     setQrNonce((n) => n + 1);
     setQr({ platform: a.platform, name: a.name, state: 'starting',
-            message: '正在启动浏览器并准备二维码…', qr: '' });
+            message: manual && a.platform === 'xiaohongshu' ? '正在打开专用普通 Chrome，请在官网手动登录…'
+              : manual || a.loginWindow ? '正在打开浏览器窗口，请在官网手动登录…'
+              : '正在启动浏览器并准备二维码…', qr: '' });
     try {
-      const res = await startLogin(a.platform);
+      const res = await (manual ? startLogin(a.platform, true) : startLogin(a.platform));
       if (!aliveRef.current || qrRequest.current !== sequence) return;
       if (res.mode === 'terminal') {
         setQr(null);
@@ -411,6 +414,7 @@ export default function AccountsPage() {
           const w = whoami[a.platform];
           const info = w && w !== 'loading' ? w : null;
           const logged = effLoggedIn(a);
+          const dualLogin = a.supported && !a.loginWindow && ['xhs', 'web', 'douyin'].includes(a.backend);
           return (
             <div key={a.platform} className="card account-card" style={{ opacity: a.supported ? 1 : 0.6 }}>
               <div className="account-card-head">
@@ -428,9 +432,26 @@ export default function AccountsPage() {
                 <div className="account-card-note">{a.note ? a.note : `后端：${a.name}`}</div>
               )}
 
-              <div style={{ display: 'flex', gap: 8, marginTop: 'auto' }}>
+              {a.platform === 'xiaohongshu' && (
+                <div className="account-card-note">本机兼容扫码会打开原生专用窗口，请保持窗口开启；普通 Chrome 手动登录是独立方式。</div>
+              )}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 'auto' }}>
+                {dualLogin && (
+                  <button className="btn btn-sm" disabled={busy === a.platform}
+                    onClick={() => handleLogin(a, true)}>
+                    {a.platform === 'xiaohongshu' ? '普通Chrome手动登录' : '窗口手动登录'}
+                  </button>
+                )}
                 {logged ? (
                   <>
+                    {a.supported && a.loginWindow && (
+                      <button className="btn btn-sm" disabled={busy === a.platform}
+                        onClick={() => handleLogin(a)}>窗口手动登录</button>
+                    )}
+                    {dualLogin && (
+                      <button className="btn btn-sm" disabled={busy === a.platform}
+                        onClick={() => handleLogin(a)}>二维码登录</button>
+                    )}
                     <button className="btn btn-sm" style={{ flex: 1 }}
                       disabled={busy === a.platform || busy === a.platform + ':mp' || w === 'loading'}
                       onClick={() => runWhoami(a.platform)}>
@@ -448,7 +469,8 @@ export default function AccountsPage() {
                     className={`btn btn-block ${a.supported ? 'btn-primary' : ''}`}
                     disabled={!a.supported || busy === a.platform || busy === a.platform + ':mp'}
                     onClick={() => (a.backend === 'wechat-oa' ? handleMpLogin(a) : handleLogin(a))}>
-                    {(busy === a.platform || busy === a.platform + ':mp') ? '启动中…' : '登录'}
+                    {(busy === a.platform || busy === a.platform + ':mp') ? '启动中…'
+                      : a.loginWindow ? '窗口手动登录' : dualLogin ? '二维码登录' : '登录'}
                   </button>
                 )}
               </div>

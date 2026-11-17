@@ -38,6 +38,8 @@ function editor(overrides = {}) {
     fetchWorkbenchBrief:async()=>({...brief}), fetchWorkbenchSkills:async()=>({items:[{id:'skill',title:'讲故事',description:'结构',source:'内置'}]}),
     fetchWorkbenchDocuments:async()=>({items:[{id:'doc',title:'资料甲',type:'文档',source:'本地',available:true},{id:'bad',title:'不可用资料',available:false,reason:'缺失'}]}),
     fetchWorkbenchVersions:async()=>({items:[{id:'v1',name:'原稿',text:'原稿文本',created_at:'今天'}]}),
+    fetchTaskInspiration:async()=>({enabled:false,references:[],exclude:'',snapshots:[]}),
+    saveTaskInspiration:async(...args)=>{calls.push(['inspirations',...args]);return {enabled:args[2],references:args[3],exclude:'',snapshots:[]};},
     saveWorkbenchBrief:async(...args)=>{calls.push(['brief',...args]);return {...args[2],evidence:[]};},
     saveWorkbenchVersion:async(...args)=>{calls.push(['version',...args]);},
     fetchWorkbench:async()=>({tasks:[task]}), fetchLastTurn:async()=>({status:'done',text:'真实对话稿'}), ...overrides,
@@ -71,9 +73,9 @@ test('讨论生成先保存当前观点及ID，目录可过滤', async()=>{
   h.button('继续讨论').props.onClick();await tick();
   assert.equal(h.calls[0][0],'brief');assert.equal(h.calls[0][3].viewpoint,'我的新观点');
   assert.deepEqual(Array.from(h.calls[0][3].skill_ids),['skill']);
-  assert.deepEqual(h.calls[1],['action','讨论']);
+  assert.deepEqual(h.calls.find(call => call[0] === 'action'), ['action','讨论']);
   h.button('生成口播').props.onClick();await tick();
-  assert.equal(h.calls[2][0],'brief');assert.deepEqual(h.calls[3],['action','口播']);
+  assert.equal(h.calls.filter(call => call[0] === 'brief').length,2);assert.deepEqual(h.calls.filter(call => call[0] === 'action').at(-1),['action','口播']);
 });
 test('依据保存失败不进入生成', async()=>{
   const h=editor({saveWorkbenchBrief:async()=>{throw new Error('保存失败');}});await tick();
@@ -162,4 +164,21 @@ test('新任务创建绑定一次会话，之后生成复用已有会话', async
   runInNewContext(ts.transpileModule(block+'\nglobalThis.run=handleGenerateWorkbench;',{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,sandbox);
   await sandbox.run(card,'母稿',['公众号']);await sandbox.run(card,'口播',['公众号']);
   assert.equal(created,1);assert.equal(calls[1][0],'new-session');assert.equal(calls[3][0],'new-session');
+});
+
+test('失败的模型回复不能取回为稿件', async()=>{
+  const h=editor({fetchLastTurn:async()=>({status:'done',text:'模型调用失败',clean_end:false,stop_reason:'error'})});
+  await tick();await h.button('取回最新对话稿').props.onClick();await tick();
+  assert.equal(h.input('稿件文本').props.value,'');
+  assert.ok(h.render().some(node=>node.props?.children==='本轮生成失败，不能作为稿件取回；请修正模型配置或重试。'));
+});
+
+test('通用创作先保存显式灵感引用，失败不发模型',async()=>{
+  const h=editor({fetchTaskInspiration:async()=>({enabled:true,references:[{idea_id:'old'}],exclude:'',snapshots:[]})});
+  await tick();await h.button('生成口播').props.onClick();await tick();
+  assert.deepEqual(h.calls.map(c=>c[0]),['brief','inspirations','action']);
+  assert.equal(h.calls[1][3],true);assert.equal(h.calls[1][4][0].idea_id,'old');
+  const bad=editor({saveTaskInspiration:async()=>{throw new Error('引用保存失败');}});
+  await tick();await bad.button('生成口播').props.onClick();await tick();
+  assert.equal(bad.calls.some(c=>c[0]==='action'),false);
 });

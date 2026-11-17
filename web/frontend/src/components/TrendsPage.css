@@ -1,0 +1,25 @@
+/* Keep source discussion discoverable without hover, including touch screens. */
+.raw-trends-panel .trend-item {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 6px 10px;
+}
+.raw-trends-panel .trend-item-actions {
+  grid-column: 2;
+  position: static;
+  transform: none;
+  opacity: 1;
+  pointer-events: auto;
+  padding: 0;
+  background: transparent;
+  justify-content: flex-end;
+}
+.raw-trends-panel .trend-use {
+  gap: 5px;
+  padding: 5px 9px;
+  color: var(--accent-end);
+}
+.raw-trends-panel .trend-use:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}

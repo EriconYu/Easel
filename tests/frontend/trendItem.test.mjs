@@ -30,7 +30,7 @@ function setup() {
   const exports = {};
   runInNewContext(outputText, { exports, require: name => modules[name], window: {} });
   const topics = [];
-  return { tree: exports.TrendsPanel({ onUseTopic: value => topics.push(value) }), calls, topics };
+  return { tree: exports.TrendsPanel({ persona: '测试', importing: false, onImportSource: async value => topics.push(value) }), calls, topics };
 }
 function nodes(tree) {
   if (Array.isArray(tree)) return tree.flatMap(nodes);
@@ -38,7 +38,7 @@ function nodes(tree) {
   return [tree, ...nodes(tree.props?.children)];
 }
 
-test('热点操作保留完整标题，并分别触发收藏与内容创作', async () => {
+test('热点操作保留完整来源，并分别触发收藏与工作台导入', async () => {
   const app = setup();
   const all = nodes(app.tree);
   const link = all.find(node => node.props?.className === 'trend-title');
@@ -47,11 +47,15 @@ test('热点操作保留完整标题，并分别触发收藏与内容创作', as
   assert.equal(link.props.title, title);
   assert.equal(link.props.href, item.url);
   assert.equal(save.props['aria-label'], `收藏选题：${title}`);
-  assert.equal(use.props['aria-label'], `做成内容：${title}`);
-  assert.equal(use.props.children.type, 'chat');
+  assert.equal(use.props['aria-label'], `带来源讨论：${title}`);
+  assert.equal(use.props.children[0].type, 'chat');
+  assert.equal(use.props.children[1].props.children, '带来源讨论');
   use.props.onClick();
   await save.props.onClick();
-  assert.deepEqual(app.topics, [title]);
+  assert.equal(app.topics[0].title, title);
+  assert.equal(app.topics[0].url, item.url);
+  assert.equal(app.topics[0].platform, group.platform);
+  assert.equal(app.topics[0].label, group.label);
   assert.equal(app.calls.length, 1);
   assert.equal(app.calls[0].title, title);
   assert.equal(app.calls[0].source, '知乎');

@@ -820,9 +820,10 @@ export default function App() {
           />
         ) : null;
       case 'trends':
-        return <TrendsPage onUseTopic={handleUseTopic} />;
+        return <TrendsPage persona={selectedPersona} onNavigate={setCurrentPage}
+          onGenerateWorkbench={handleGenerateWorkbench} onContinueWorkbench={handleContinueWorkbench} />;
       case 'ideas':
-        return <IdeasPage onUseTopic={handleUseTopic} />;
+        return <IdeasPage persona={selectedPersona} onDevelop={handleGenerateWorkbench} />;
       case 'calendar':
         return <CalendarPage />;
       case 'publish':

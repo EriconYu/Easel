@@ -22,7 +22,7 @@ export interface WorkbenchSource { platform:string; url:string; published_at:str
 export interface WorkbenchCard { task_id:string; title:string; source_title?:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes:number; platforms:string[]; evergreen:boolean }
 export type WorkbenchFormat = '讨论'|'母稿'|'口播'|'平台稿';
 export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string }
-export interface WorkbenchResult { cards:WorkbenchCard[]; failures:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
+export interface WorkbenchResult { cards:WorkbenchCard[]; failures:string[]; pending_sources?:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
 export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[]; days:1|3|7; include_search:boolean }
 const wbPost = <T,>(path:string, body:unknown):Promise<T> => request(`/api/workbench/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[]}>{return request(`/api/workbench/${encodeURIComponent(persona)}`)}
@@ -385,9 +385,33 @@ export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
 // ---- 选题库 ----
 export interface Idea {
   id: string; title: string; note: string; source: string; status: string; created: number;
+  original_text: string; persona: string; topic: string; tags: string[];
+  good_performance: boolean; priority_reuse: boolean; publish_url: string; review_note: string;
+  developments: Record<string, {task_id: string; session_id: string}>;
 }
-export type IdeaInput = { title: string; note?: string; source?: string; status?: string };
-export function fetchIdeas(): Promise<Idea[]> { return request('/api/ideas'); }
+export type IdeaInput = Partial<Omit<Idea, 'id' | 'created' | 'developments'>>;
+export interface IdeaReference { idea_id: string; version_id?: string }
+export function fetchIdeas(filters: {q?: string; persona?: string; exclude?: string; good_only?: boolean} = {}): Promise<Idea[]> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) if (value !== undefined) params.set(key, String(value));
+  return request(`/api/ideas?${params}`);
+}
+export function developIdea(id: string, persona: string, format: WorkbenchFormat, platforms: string[], references: IdeaReference[]): Promise<{idea: Idea; task: WorkbenchTask; context: string}> {
+  return request(`/api/ideas/${encodeURIComponent(id)}/develop`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({persona, format, platforms, references})});
+}
+export function fetchIdeaVersions(id: string, persona: string): Promise<WorkbenchVersion[]> {
+  return request(`/api/ideas/${encodeURIComponent(id)}/versions?persona=${encodeURIComponent(persona)}`);
+}
+export interface TaskInspiration {
+  enabled: boolean; references: IdeaReference[]; exclude: string;
+  snapshots: {id: string; title: string; version_id?: string; version_name?: string}[];
+}
+export function fetchTaskInspiration(persona: string, taskId: string): Promise<TaskInspiration> {
+  return request(`/api/workbench/inspiration/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+}
+export function saveTaskInspiration(persona: string, task_id: string, enabled: boolean, references: IdeaReference[]): Promise<TaskInspiration> {
+  return wbPost('inspiration', {persona,task_id,enabled,references});
+}
 export function createIdea(item: IdeaInput): Promise<Idea> {
   return request('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(item) });
 }
@@ -543,6 +567,7 @@ export interface AccountItem {
   platform: string;
   name: string;
   backend: string;      // xhs | web | biliup | unsupported
+  loginWindow?: boolean; // window-only (e.g. X), no native QR mode
   supported: boolean;
   loggedIn: boolean;
   note: string;
@@ -681,8 +706,8 @@ export function submitPublishSms(platform: string, code: string): Promise<{ ok: 
   });
 }
 
-export function startLogin(platform: string): Promise<LoginStart> {
-  return request<LoginStart>(`/api/login/${encodeURIComponent(platform)}?restart=true`, { method: 'POST' });
+export function startLogin(platform: string, manual = false): Promise<LoginStart> {
+  return request<LoginStart>(`/api/login/${encodeURIComponent(platform)}?restart=true${manual ? '&manual=true' : ''}`, { method: 'POST' });
 }
 
 export function loginStatus(platform: string): Promise<LoginStatus> {
@@ -897,7 +922,7 @@ export function streamChat(
 }
 
 /** 取某会话最近一轮的完整结果（SSE 断线后据此取回）。 */
-export function fetchLastTurn(sessionId: string, turnId?: string): Promise<{ status: string; text: string; turn_id?: string }> {
+export function fetchLastTurn(sessionId: string, turnId?: string): Promise<{ status: string; text: string; turn_id?: string; clean_end?: boolean; stop_reason?: string }> {
   const query = turnId ? `?turn_id=${encodeURIComponent(turnId)}` : '';
   return request(`/api/chat/last/${encodeURIComponent(sessionId)}${query}`);
 }

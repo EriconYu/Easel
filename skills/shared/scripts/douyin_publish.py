@@ -977,7 +977,7 @@ def _run_login(a) -> int:
     login_state.write_status(sf, "starting")
     if a.headed:
         login_state.write_status(sf, "window_login",
-                               "请在弹出的浏览器窗口里用抖音 App 扫码，不要关掉那个窗口。")
+                               "请在弹出的浏览器窗口里手动完成登录及官网验证，不要关掉那个窗口。")
 
     with sync_playwright() as p:
         ctx = _launch(p, headed=a.headed, base=a.profile_base, proxy=_proxy(a.proxy, a.no_proxy))
@@ -996,6 +996,23 @@ def _run_login(a) -> int:
                 login_state.write_status(sf, "success", "已登录")
                 print("✅ 抖音已登录（登录态在持久化目录）")
                 return 0
+            if a.headed:
+                # 手动模式只观察现有页面，短信/扫码方式及验证均由用户在官网选择。
+                deadline = time.time() + timeout_s
+                while time.time() < deadline:
+                    if not ctx.pages:
+                        login_state.write_status(sf, "expired", "登录窗口已关闭，请重新发起登录")
+                        return 1
+                    if any(_logged_in(candidate) for candidate in ctx.pages):
+                        login_state.write_status(sf, "success", "登录成功")
+                        try:
+                            qr_out.unlink()
+                        except OSError:
+                            pass
+                        return 0
+                    time.sleep(1.5)
+                login_state.write_status(sf, "expired", "登录窗口超时未完成登录，请重新发起登录")
+                return 1
             # 抖音登录默认可能是「验证码登录」tab，二维码在「扫码登录」tab 下——先切过去
             try:
                 tab = page.query_selector(f"text={SELECTORS['qr_tab']}")

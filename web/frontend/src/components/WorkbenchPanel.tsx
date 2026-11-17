@@ -99,6 +99,7 @@ export default function WorkbenchPanel({ persona, onGenerateWorkbench, onContinu
       <section className="workbench-recommendations">
         <div className="workbench-section-head"><div><h3>推荐卡</h3><p>{result?.ranking || '规则推荐'} · 搜索范围最近{result?.days || days}天，热榜原文日期仍需核验。AI 分析期间显示现有推荐，失败时保留规则结果。</p></div></div>
         {result?.failures?.map((failure, i) => <p className="workbench-notice" key={i}>来源失败：{failure}</p>)}
+        {result?.pending_sources?.length ? <p className="workbench-notice" role="status">来源仍在采集中：{result.pending_sources.join('、')}。这不是采集失败，完成后可重新生成推荐。</p> : null}
         {result?.search_warnings?.map((warning, i) => <p className="workbench-notice" key={`search-${i}`}>搜索说明：{warning}</p>)}
         {!result?.cards?.length && <p className="workbench-muted">暂无推荐，先填写今日意愿并生成。</p>}
         <div className="workbench-card-grid">{result?.cards.slice(0, 5).map(card => <article className="workbench-recommendation" key={card.task_id}>

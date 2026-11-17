@@ -124,3 +124,25 @@ def test_mp_exited_runner_always_terminates_polling(tmp_path, monkeypatch, state
     status = web._mp_login_status()
     assert status["state"] == "error"
     assert status["qr"] == ""
+
+
+def test_xhs_manual_browser_route_passes_flag_without_real_browser(tmp_path, monkeypatch):
+    monkeypatch.setattr(web, 'LOGIN_DIR', tmp_path)
+    monkeypatch.setattr(web, 'LOGIN_PROCESSES', {})
+    monkeypatch.setattr(web, '_LOGIN_START_LOCKS', {})
+    launch = Mock(return_value=SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(web.subprocess, 'Popen', launch)
+    result = asyncio.run(web.api_login_start('xiaohongshu', restart=True, manual=True))
+    assert '--manual-browser' in launch.call_args.args[0]
+    assert result['state'] == 'starting'
+    assert 'Chrome' in result['message']
+
+
+@pytest.mark.parametrize('platform', ['bilibili', 'wechat-oa'])
+def test_manual_browser_rejects_unsupported_backend_before_launch(monkeypatch, platform):
+    launch = Mock()
+    monkeypatch.setattr(web.subprocess, 'Popen', launch)
+    with pytest.raises(web.HTTPException) as failure:
+        asyncio.run(web.api_login_start(platform, manual=True))
+    assert failure.value.status_code == 400
+    launch.assert_not_called()

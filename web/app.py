@@ -4501,6 +4501,7 @@ async def api_accounts():
     return [
         {'platform': pf, 'name': cfg['name'], 'backend': cfg['backend'],
          'supported': cfg['backend'] != 'unsupported',
+         'loginWindow': bool(cfg.get('login_window')),
          'loggedIn': _account_logged_in(pf, cfg),
          'note': cfg.get('note', '')}
         for pf, cfg in LOGIN_RUNNERS.items()
@@ -4508,15 +4509,17 @@ async def api_accounts():
 
 
 @app.post("/api/login/{platform}")
-async def api_login_start(platform: str, restart: bool = False):
+async def api_login_start(platform: str, restart: bool = False, manual: bool = False):
     if platform not in LOGIN_RUNNERS:
         raise HTTPException(404, '未知平台')
+    if manual and LOGIN_RUNNERS[platform]['backend'] not in ('xhs', 'web', 'douyin'):
+        raise HTTPException(400, '该平台不支持独立窗口手动登录')
     lock = _LOGIN_START_LOCKS.setdefault(platform, asyncio.Lock())
     async with lock:
-        return await _start_login(platform, restart)
+        return await _start_login(platform, restart, manual)
 
 
-async def _start_login(platform: str, restart: bool = False):
+async def _start_login(platform: str, restart: bool = False, manual: bool = False):
     """启动后台登录并立即返回，二维码由前端状态轮询获取。"""
     cfg = LOGIN_RUNNERS.get(platform)
     if not cfg:
@@ -4549,6 +4552,11 @@ async def _start_login(platform: str, restart: bool = False):
     if backend == 'xhs':
         cmd = [sys.executable, str(SHARED_SCRIPTS / 'xhs_publish.py'), 'login', '--no-proxy',
                '--qr-out', str(qr), '--status-file', str(status), '--timeout', str(LOGIN_TIMEOUT)]
+        if manual:
+            cmd.append('--manual-browser')
+        elif sys.platform == 'darwin' and not (os.environ.get('SSH_CONNECTION') or os.environ.get('SSH_TTY')):
+            # 本机 macOS 原生可见内核兼容扫码；与普通 Chrome 手动会话不是同一路径。
+            cmd.append('--headed')
     elif backend == 'biliup':
         # B站：TV 端扫码登录 API 生成二维码 + 写 biliup cookie（biliup login 需真终端，前端用不了）
         cmd = [sys.executable, str(SHARED_SCRIPTS / 'bili_login.py'), 'login',
@@ -4564,6 +4572,8 @@ async def _start_login(platform: str, restart: bool = False):
                '--no-proxy',
                '--qr-out', str(qr), '--status-file', str(status),
                '--sms-code-file', str(code_file), '--timeout', str(LOGIN_TIMEOUT)]
+        if manual:
+            cmd.append('--headed')
     elif backend == 'toutiao':
         # 扫码后可能要求绑定手机号；必须弹有头窗口让账号本人填写手机号和验证码。
         cmd = [sys.executable, str(TOUTIAO_SCRIPTS / 'toutiao_publish.py'), 'login',
@@ -4573,7 +4583,7 @@ async def _start_login(platform: str, restart: bool = False):
         cmd = [sys.executable, str(SHARED_SCRIPTS / 'web_publisher.py'), 'login-qr',
                '--platform', cfg['wp'], '--qr-out', str(qr), '--status-file', str(status),
                '--timeout', str(LOGIN_TIMEOUT)]
-        if cfg.get('login_window'):
+        if manual or cfg.get('login_window'):
             # 无扫码平台（X）：弹有头窗口手动登录，前端按 window_login 状态展示提示
             cmd.append('--headed')
     # 新登录开始 → 清掉旧的 whoami 缓存（登录前可能缓存了「未登录」），避免登录成功后仍读到旧结果
@@ -4592,7 +4602,12 @@ async def _start_login(platform: str, restart: bool = False):
     LOGIN_PROCESSES[platform] = proc
     s = _login_status(platform)
     if s['state'] == 'unknown':
-        s.update(state='starting', message='正在启动浏览器并准备二维码…')
+        message = ('正在打开专用普通 Chrome，请在官网手动登录…' if manual and backend == 'xhs'
+                   else '正在打开浏览器窗口，请在官网手动登录…' if manual or cfg.get('login_window')
+                   else '正在打开原生扫码窗口并准备二维码，请保持专用窗口打开…' if backend == 'xhs' and '--headed' in cmd
+                   else '正在使用无界面原生扫码准备二维码…' if backend == 'xhs'
+                   else '正在启动浏览器并准备二维码…')
+        s.update(state='starting', message=message)
     return {'mode': 'qr', **s}
 
 
@@ -4840,6 +4855,7 @@ async def _check_account_whoami(platform: str, force: bool = False):
         raise HTTPException(504, '校验超时（浏览器起不来或网络慢）')
     data = {'loggedIn': False, 'name': '', 'avatar': ''}
     confident = False
+    verification_error = ''
     for line in reversed((proc.stdout or '').strip().splitlines()):
         line = line.strip()
         if line.startswith('{'):
@@ -4848,6 +4864,8 @@ async def _check_account_whoami(platform: str, force: bool = False):
                 data = {'loggedIn': bool(d.get('loggedIn')), 'name': d.get('name') or '', 'avatar': d.get('avatar') or ''}
                 # 有 error 字段 = 校验本身失败（浏览器起不来/网络抖动/崩溃），不是可信的「未登录」结论
                 confident = proc.returncode == 0 and isinstance(d.get('loggedIn'), bool) and not d.get('error')
+                if backend == 'xhs' and isinstance(d.get('error'), str) and ('手动会话' in d['error'] or '专用 Chrome' in d['error']):
+                    verification_error = d['error']
                 break
             except Exception:
                 continue
@@ -4856,7 +4874,7 @@ async def _check_account_whoami(platform: str, force: bool = False):
             or (current_process is not None and current_process.poll() is None)):
         return {'loggedIn': _account_logged_in(platform, cfg), 'name': '', 'avatar': ''}
     if not confident:
-        raise HTTPException(502, '未能确认当前账号身份，请稍后重试校验；原登录状态和账号资料保持不变')
+        raise HTTPException(502, verification_error or '未能确认当前账号身份，请稍后重试校验；原登录状态和账号资料保持不变')
     verified_logged_in = data['loggedIn']
     if backend == 'wechat-oa' and not verified_logged_in and _wechat_has_credentials():
         account = _wechat_web_account()
@@ -4882,6 +4900,8 @@ async def api_logout(platform: str):
     cfg = LOGIN_RUNNERS.get(platform)
     if not cfg:
         raise HTTPException(404, '未知平台')
+    if cfg['backend'] == 'xhs' and (BROWSER_PROFILES / 'XiaohongshuManualChrome' / 'easel-manual-session.json').exists():
+        raise HTTPException(409, '请在专用普通 Chrome 的官网页面退出账号；Easel 不会关闭您的 Chrome 或把断开连接报告为退出登录')
     deleted = []
     if cfg['backend'] == 'wechat-oa':
         # 1) 清 AppID 凭证（旧配置兜底）
@@ -5611,6 +5631,23 @@ async def api_trends(platforms: str | None = None, limit: int = 12):
               for identifier, result in zip(selected, results)]
     return {"version": 1, "trends": groups, "updated": int(time.time()), "warnings": warnings}
 
+async def _workbench_trends():
+    """Join an in-flight dashboard collection before snapshotting recommendation sources."""
+    from easel.timeouts import TIMEOUT_TREND_COLLECT, TIMEOUT_TREND_STARTUP
+    collection = await api_trends(limit=30)
+    groups = {group['platform']: group for group in collection.get('trends', [])}
+    deadline = time.monotonic() + TIMEOUT_TREND_COLLECT + TIMEOUT_TREND_STARTUP
+    while time.monotonic() < deadline:
+        pending = [key for key, group in groups.items()
+                   if not group.get('items') and (group.get('error') or {}).get('code') == 'busy']
+        if not pending:
+            break
+        await asyncio.sleep(min(0.25, max(0, deadline - time.monotonic())))
+        refreshed = await api_trends(platforms=','.join(pending), limit=30)
+        groups.update((group['platform'], group) for group in refreshed.get('trends', []))
+    return {**collection, 'trends': list(groups.values())}
+
+
 class WorkbenchRecommendRequest(BaseModel):
     model_config = {"strict": True, "extra": "forbid"}
     persona: str
@@ -5626,6 +5663,20 @@ class WorkbenchTaskRequest(BaseModel):
     persona: str
     task: dict
 
+class RadarImportRequest(BaseModel):
+    persona: str
+    source: dict
+
+
+@app.post('/api/workbench/import-source')
+async def api_radar_import(req: RadarImportRequest):
+    from easel.radar import import_source
+    try:
+        return await asyncio.to_thread(import_source, req.persona, req.source)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+
+
 @app.post("/api/workbench/recommend")
 async def api_workbench_recommend(req: WorkbenchRecommendRequest):
     if not valid_persona_name(req.persona) or not profile_exists(req.persona):
@@ -5634,7 +5685,7 @@ async def api_workbench_recommend(req: WorkbenchRecommendRequest):
     except ValueError as e: raise HTTPException(400, str(e)) from None
     if req.days not in {1, 3, 7}:
         raise HTTPException(400, '只支持最近1、3、7天')
-    collection = await api_trends(limit=30)
+    collection = await _workbench_trends()
     groups = list(collection.get("trends", []))
     search_warnings = []
     if req.include_search:
@@ -5877,79 +5928,82 @@ async def api_schedule_context(days: int = 14):
 
 
 IDEAS_FILE = OUTPUTS_DIR / "_ideas.json"
-IDEA_STATUSES = {"pending", "doing", "done"}
 
 
-def _read_ideas() -> list[dict]:
-    if not IDEAS_FILE.is_file():
-        return []
+from easel import ideas as idea_store
+
+
+def _idea_call(fn, *args, **kwargs):
     try:
-        d = json.loads(IDEAS_FILE.read_text(encoding="utf-8"))
-        return d if isinstance(d, list) else []
-    except Exception:
-        return []
-
-
-def _write_ideas(items: list[dict]) -> None:
-    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = IDEAS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(IDEAS_FILE)
-
-
-class IdeaItem(BaseModel):
-    title: str
-    note: str = ""
-    source: str = ""
-    status: str = "pending"
+        return fn(IDEAS_FILE, *args, **kwargs)
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from None
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
 
 
 @app.get("/api/ideas")
-async def api_ideas_list():
-    return _read_ideas()
+async def api_ideas_list(q: str = '', persona: str = '', exclude: str = '', good_only: bool = False):
+    return _idea_call(idea_store.search, q, persona, exclude, good_only)
 
 
 @app.post("/api/ideas")
-async def api_ideas_create(req: IdeaItem):
-    items = _read_ideas()
-    st = req.status if req.status in IDEA_STATUSES else "pending"
-    item = {
-        "id": uuid.uuid4().hex[:12],
-        "title": req.title.strip() or "未命名选题",
-        "note": req.note,
-        "source": req.source,
-        "status": st,
-        "created": int(time.time()),
-    }
-    items.insert(0, item)
-    _write_ideas(items)
-    return item
+async def api_ideas_create(req: dict):
+    return _idea_call(idea_store.create, req)
 
 
 @app.put("/api/ideas/{iid}")
-async def api_ideas_update(iid: str, req: IdeaItem):
-    items = _read_ideas()
-    for it in items:
-        if it.get("id") == iid:
-            it.update({
-                "title": req.title.strip() or it.get("title", "未命名选题"),
-                "note": req.note,
-                "source": req.source,
-                "status": req.status if req.status in IDEA_STATUSES else it.get("status", "pending"),
-            })
-            _write_ideas(items)
-            return it
-    raise HTTPException(404, "选题不存在")
+async def api_ideas_update(iid: str, req: dict):
+    return _idea_call(idea_store.update, iid, req)
 
 
 @app.delete("/api/ideas/{iid}")
 async def api_ideas_delete(iid: str):
-    items = _read_ideas()
-    new = [it for it in items if it.get("id") != iid]
-    if len(new) == len(items):
-        raise HTTPException(404, "选题不存在")
-    _write_ideas(new)
-    return {"ok": True, "deleted": iid}
+    return _idea_call(idea_store.delete, iid)
+
+
+class IdeaReference(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    idea_id: str
+    version_id: str = ''
+
+
+class IdeaDevelopRequest(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    persona: str
+    format: str = '讨论'
+    platforms: list[str]
+    references: list[IdeaReference] = []
+
+
+@app.post('/api/ideas/{iid}/develop')
+async def api_idea_develop(iid: str, req: IdeaDevelopRequest):
+    return _idea_call(idea_store.develop, iid, req.persona, req.format, req.platforms,
+                      [ref.model_dump() for ref in req.references])
+
+
+@app.get('/api/ideas/{iid}/versions')
+async def api_idea_versions(iid: str, persona: str):
+    return _idea_call(idea_store.versions, iid, persona)
+
+
+class TaskInspirationRequest(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    persona: str
+    task_id: str
+    enabled: bool = False
+    references: list[IdeaReference] = []
+
+
+@app.get('/api/workbench/inspiration/{persona}/{task_id}')
+async def api_task_inspiration(persona: str, task_id: str):
+    return _idea_call(idea_store.task_references, persona, task_id)
+
+
+@app.post('/api/workbench/inspiration')
+async def api_task_inspiration_save(req: TaskInspirationRequest):
+    return _idea_call(idea_store.task_references, req.persona, req.task_id, req.enabled,
+                      [ref.model_dump() for ref in req.references])
 
 
 if __name__ == "__main__":

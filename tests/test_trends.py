@@ -54,6 +54,20 @@ def test_builtin_falls_back_and_returns_wire_contract(monkeypatch, mode):
     assert calls == list(builtin.SOURCES["weibo"])
 
 
+def test_builtin_keeps_valid_rows_when_one_upstream_link_is_invalid(monkeypatch):
+    calls = []
+    def fetch(url):
+        calls.append(url)
+        return {'data': [
+            {'title': '真实热点', 'url': 'https://example.com/one'},
+            {'title': '无效链接', 'url': 'https://s.weibo.com/weibo?q=字节 微信'},
+        ]}
+    monkeypatch.setattr(builtin, 'fetch_json', fetch)
+    payload = validate_payload(builtin.collect_platform('weibo'))
+    assert [row['title'] for row in payload['items']] == ['真实热点']
+    assert len(calls) == 1
+
+
 def test_builtin_outage_is_not_successful_empty_result(monkeypatch):
     monkeypatch.setattr(builtin, "fetch_json", lambda url: {"data": []})
     with pytest.raises(RuntimeError):

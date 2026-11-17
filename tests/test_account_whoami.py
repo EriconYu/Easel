@@ -214,3 +214,18 @@ def test_incomplete_identity_does_not_stay_cached_for_ten_minutes(account_state,
     result = asyncio.run(web.api_account_whoami("xiaohongshu"))
     assert result["name"] == "Me"
     assert result["avatar"]
+
+
+def test_offline_manual_chrome_preserves_login_and_explains_reopen(account_state, monkeypatch):
+    web._write_login_marker('xiaohongshu', 'success', 'Previously verified account')
+    monkeypatch.setattr(web.subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stdout=json.dumps({
+            'loggedIn': False, 'name': '', 'avatar': '',
+            'error': '专用 Chrome 已关闭，请重新打开手动会话；尚未确认账号退出',
+        })))
+    with pytest.raises(web.HTTPException) as failure:
+        asyncio.run(web.api_account_whoami('xiaohongshu', force=True))
+    assert failure.value.status_code == 502
+    assert '重新打开手动会话' in failure.value.detail
+    assert json.loads((account_state / 'xiaohongshu.json').read_text())['state'] == 'success'
+    assert not web._WHOAMI_CACHE

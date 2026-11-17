@@ -648,7 +648,12 @@ def _scrape(platform: str, headed: bool, base: str | None, proxy: str | None) ->
                 if proxy:
                     kwargs["proxy"] = {"server": proxy}
                 ctx = p.chromium.launch_persistent_context(str(profile), **kwargs)
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            if platform == "xiaohongshu":
+                from xhs_manual_browser import BorrowedContext
+                # Explicit data collection owns its operation page, never the user's tab.
+                page = ctx.new_page() if isinstance(ctx, BorrowedContext) else (ctx.pages[0] if ctx.pages else ctx.new_page())
+            else:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
             try:
                 if platform == "xiaohongshu":
                     return _scrape_xhs(ctx, page, r)
