@@ -37,7 +37,7 @@ export default function BreakdownPage({ persona }: BreakdownPageProps) {
     if (!result) return;
     const firstLine = input.trim().split('\n')[0].slice(0, 24);
     await createIdea({ title: `拆解模板：${firstLine}`, note: result, source: '爆款拆解', status: 'pending' });
-    setToast('已存入选题库');
+    setToast('已存入灵感收件箱');
     setTimeout(() => setToast(''), 2200);
   };
 
@@ -58,7 +58,7 @@ export default function BreakdownPage({ persona }: BreakdownPageProps) {
           <button className="btn btn-primary" disabled={loading || !input.trim()} onClick={run}>
             <IconSkills size={15} /> {loading ? '拆解中…' : '开始拆解'}
           </button>
-          {result && <button className="btn" onClick={saveToIdeas}><IconIdea size={14} /> 存入选题库</button>}
+          {result && <button className="btn" onClick={saveToIdeas}><IconIdea size={14} /> 存入灵感收件箱</button>}
           {result && <button className="btn btn-ghost" onClick={() => { setResult(''); setInput(''); }}>清空</button>}
         </div>
 

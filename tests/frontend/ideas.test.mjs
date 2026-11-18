@@ -9,10 +9,11 @@ const read=p=>readFileSync(new URL('../../web/frontend/src/'+p,import.meta.url),
 test('inbox uses selected persona and persistent task, never title-only handoff',()=>{
  const app=read('App.tsx');
  assert.match(read('components/Sidebar.tsx'), /page:\s*'ideas'[^\n]+label:\s*'灵感收件箱'/);
- assert.match(app,/<IdeasPage persona=\{selectedPersona\} onDevelop=\{handleGenerateWorkbench\}/);
+ assert.match(app,/<IdeasPage persona=\{selectedPersona\} onOpenProject=\{handleOpenProject\}/);
  const page=read('components/IdeasPage.tsx');
- assert.match(page,/original_text/);assert.match(page,/fetchIdeaVersions/);
- assert.match(page,/inspiration_references/);
+ assert.match(page,/original_text/);assert.match(page,/developIdea/);
+ assert.match(read('components/WorkbenchDiscussion.tsx'),/InspirationPicker/);
+ assert.ok(!page.includes('fetchIdeaVersions'));
  assert.ok(!page.includes('onUseTopic(it.title)'));
 });
 test('explicit references are opt-in, cancellable, and use only IDs',()=>{

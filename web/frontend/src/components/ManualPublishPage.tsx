@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { createSchedule, executeSkill, exportManualPackage, fetchOutputs, mediaUrl, runAgent, streamChat } from '../lib/api';
+import { savePublishSchedule, executeSkill, exportManualPackage, fetchOutputs, mediaUrl, runAgent, streamChat } from '../lib/api';
 import type { OutputFile } from '../lib/api';
 import { loadPublishDraft, savePublishDraft } from '../lib/store';
+import ProjectPublishSource from './ProjectPublishSource';
+import type { ProjectPublishDraft } from './ProjectPublishSource';
 import { renderMarkdown } from '../lib/sanitize';
 import { IconCalendar, IconCheck, IconCopy, IconEdit, IconPublish, IconSkills, IconStop, IconTrash } from './icons';
 
@@ -28,8 +30,9 @@ function today() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-export default function ManualPublishPage({ persona }: { persona: string }) {
+export default function ManualPublishPage({ persona, projectDraft }: { persona: string; projectDraft?:ProjectPublishDraft }) {
   const initial = useRef(loadPublishDraft()).current;
+  const [projectSource, setProjectSource] = useState(initial.project_source);
   const [title, setTitle] = useState(initial.title);
   const [body, setBody] = useState(initial.body);
   const [platforms, setPlatforms] = useState<string[]>(initial.platforms);
@@ -51,7 +54,7 @@ export default function ManualPublishPage({ persona }: { persona: string }) {
   const [saving, setSaving] = useState(false);
   const ctl = useRef<AbortController | null>(null);
 
-  useEffect(() => { savePublishDraft({ title, body, platforms, overrides, tags }); }, [title, body, platforms, overrides, tags]);
+  useEffect(() => { savePublishDraft({ title, body, platforms, overrides, tags, project_source:projectSource }); }, [title, body, platforms, overrides, tags, projectSource]);
   useEffect(() => () => ctl.current?.abort(), []);
   useEffect(() => {
     fetchOutputs().then((roots) => {
@@ -67,7 +70,7 @@ export default function ManualPublishPage({ persona }: { persona: string }) {
 
   const effective = (key: string) => overrides[key] ?? body;
   const snapshot = (key: string) => JSON.stringify([title, effective(key), tags, selectedMedia]);
-  const approved = (key: string) => reviewed[key] === snapshot(key) && !adapting;
+  const approved = (key: string) => reviewed[key] === snapshot(key) && !adapting && (!projectSource || projectSource.persona === persona);
   const empty = !title.trim() && !body.trim() && !Object.values(overrides).some((text) => text.trim());
   const showToast = (text: string) => { setToast(text); window.setTimeout(() => setToast(''), 4000); };
   const toggle = (key: string) => setPlatforms((prev) => prev.includes(key) ? prev.filter((p) => p !== key) : [...prev, key]);
@@ -126,7 +129,8 @@ export default function ManualPublishPage({ persona }: { persona: string }) {
     if (!approved(key) || exporting) return;
     setExporting(key);
     try {
-      const result = await exportManualPackage(key, { title, body: effective(key), tags, media: [...selectedMedia], reviewed: true });
+      const payload = {title,body:effective(key),tags,media:[...selectedMedia],reviewed:true,...projectSource};
+      const result = await exportManualPackage(key, payload);
       const a = document.createElement('a');
       a.href = mediaUrl(result.path); a.download = result.filename;
       document.body.appendChild(a); a.click(); a.remove();
@@ -162,9 +166,9 @@ export default function ManualPublishPage({ persona }: { persona: string }) {
     setSaving(true);
     const version = snapshot(key);
     try {
-      await createSchedule({ title: title.trim() || effective(key).slice(0, 20), date: today(), time: '',
+      await savePublishSchedule({ title: title.trim() || effective(key).slice(0, 20), date: today(), time: '',
         platform: PLATFORMS.find((p) => p.key === key)?.label || '', status: published ? 'published' : 'draft',
-        note: published ? `【人工确认已发布，未自动验证平台状态】\n${link}\n\n${effective(key)}` : effective(key) });
+        note: published ? `【人工确认已发布，未自动验证平台状态】\n${link}\n\n${effective(key)}` : effective(key), url:link, ...projectSource });
       if (published) setRecorded((prev) => ({ ...prev, [key]: version + (links[key] || '') }));
       showToast(published ? '已按你的确认记录到日历，未自动校验平台结果' : '已保存为日历草稿，不会自动发布');
     } catch (error) { showToast(error instanceof Error ? error.message : '保存失败'); }
@@ -174,6 +178,8 @@ export default function ManualPublishPage({ persona }: { persona: string }) {
   return <div className="publish-page">
     <div className="publish-editor">
       <h1 className="page-title"><IconPublish size={21} /> 发布中心 · 人工发布</h1>
+      <ProjectPublishSource draft={projectDraft} persona={persona} onImport={d=>{setTitle(d.title);setBody(d.text);setOverrides({});setTags('');setSelectedMedia([]);setReviewed({});setLinks({});setRecorded({});setProjectSource({persona:d.persona,task_id:d.task_id,version_id:d.version_id});}} />
+      {projectSource && <p>关联内容项目：{projectSource.task_id} · 源稿版本：{projectSource.version_id}。{projectSource.persona!==persona ? '画像不匹配，导出和发布确认已禁用。' : '适配稿不覆盖项目原稿。'}</p>}
       <p className="page-subtitle">AI 排版 → 人工审核 → 复制 / 导出 → 在官方发布页亲自提交。</p>
       <div className="panel" style={{ marginBottom: 16, fontSize: 13 }}>
         <strong>最终提交由你完成。</strong> 本页不自动登录、上传或点击发布。官方页面的登录与 Easel 账号页相互独立。
@@ -202,7 +208,7 @@ export default function ManualPublishPage({ persona }: { persona: string }) {
           : <button className="btn btn-sm btn-primary" disabled={empty || !platforms.length} onClick={adapt}><IconSkills size={14} /> AI 排版 / 适配</button>}
         <button className="btn btn-sm" disabled={empty || checking || adapting} onClick={check}><IconCheck size={14} />{checking ? '检查中…' : 'AI 辅助检查'}</button>
         <button className="btn btn-sm" disabled={empty || saving || adapting} onClick={() => addToCalendar(platforms[0] || 'xiaohongshu')}><IconCalendar size={14} /> 存草稿并排期</button>
-        <button className="btn btn-sm btn-ghost" disabled={empty || adapting} onClick={() => { setTitle(''); setBody(''); setTags(''); setOverrides({}); setReviewed({}); setCheckResult(''); }}><IconTrash size={13} /> 清空文案</button>
+        <button className="btn btn-sm btn-ghost" disabled={empty || adapting} onClick={() => { setProjectSource(undefined); setTitle(''); setBody(''); setTags(''); setOverrides({}); setReviewed({}); setCheckResult(''); }}><IconTrash size={13} /> 清空文案</button>
       </div>
       <p className="publish-saved-note">文案自动保存到当前浏览器。审核只针对当前版本；修改标题、正文、标签或素材后，需重新审核。AI 检查仅作参考。</p>
       {checkResult && <div className="panel"><div className="panel-title">AI 辅助检查</div><div className="skill-body-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(checkResult) }} /></div>}

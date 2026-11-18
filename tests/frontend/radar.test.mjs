@@ -10,7 +10,7 @@ const walk=(x)=>Array.isArray(x)?x.flatMap(walk):x&&typeof x==='object'?[x,...wa
 test('热点雷达独立导航且App传入同一画像和生成会话回调',()=>{
  assert.match(read('components/Sidebar.tsx'),/page: 'trends', Icon: IconFire, label: '热点雷达'/);
  const app=read('App.tsx');
- assert.match(app,/case 'trends':[\s\S]*?<TrendsPage[\s\S]*?persona=\{selectedPersona\}[\s\S]*?onGenerateWorkbench=\{handleGenerateWorkbench\}[\s\S]*?onContinueWorkbench=\{handleContinueWorkbench\}/);
+ assert.match(app,/case 'trends':[\s\S]*?<TrendsPage[\s\S]*?persona=\{selectedPersona\}[\s\S]*?onOpenProject=\{handleOpenProject\}/);
 });
 test('默认画像选题视图复用工作台，原始热榜须明确切换',()=>{
  const source=read('components/TrendsPage.tsx').replace('function RadarPanel(', 'export function RadarPanel(');

@@ -18,14 +18,17 @@ export class ApiError extends Error {
   }
 }
 
-export interface WorkbenchSource { platform:string; url:string; published_at:string|null; fetched_at:string|null; evidence:string }
-export interface WorkbenchCard { task_id:string; title:string; source_title?:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes:number; platforms:string[]; evergreen:boolean }
+export interface WorkbenchSource { kind?:'trend'|'search'; provider?:string; platform:string; url:string; published_at:string|null; fetched_at:string|null; evidence:string }
+export interface WorkbenchCard { task_id:string; title:string; source_title?:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes?:number; analysis_evidence?:string; analysis_engine?:{runtime:string;model:string}|null; analyzed_at?:string; platforms:string[]; evergreen:boolean }
 export type WorkbenchFormat = '讨论'|'母稿'|'口播'|'平台稿';
 export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string }
-export interface WorkbenchResult { cards:WorkbenchCard[]; failures:string[]; pending_sources?:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
+export interface WorkbenchResult { updated_at?:string; analyzed_at?:string; cards:WorkbenchCard[]; failures:string[]; pending_sources?:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
 export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[]; days:1|3|7; include_search:boolean }
 const wbPost = <T,>(path:string, body:unknown):Promise<T> => request(`/api/workbench/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[]}>{return request(`/api/workbench/${encodeURIComponent(persona)}`)}
+export interface WorkbenchEngines { search:{provider:string;providers:{id:string;label:string;configured:boolean}[];key_configured:boolean}; analysis:{runtime:string;model:string;label:string} }
+export function fetchWorkbenchEngines():Promise<WorkbenchEngines>{return request('/api/workbench/engines')}
+export function saveWorkbenchSearchSettings(body:{provider:string;api_key?:string;clear_key?:boolean}):Promise<WorkbenchEngines['search']>{return wbPost('search-settings',body)}
 export function recommendWorkbench(body:WorkbenchInput):Promise<WorkbenchResult>{return wbPost('recommend',body)}
 export function saveWorkbenchTask(persona:string,task:Partial<WorkbenchTask>&{task_id:string}):Promise<WorkbenchTask>{return wbPost('task',{persona,task})}
 export function dismissWorkbench(persona:string,task_id:string):Promise<{ok:boolean}>{return wbPost('feedback',{persona,task_id})}
@@ -353,6 +356,9 @@ export interface ScheduleItem {
   source?: string;        // manual | publish-page | chat | scheduler
   event_type?: string;    // event 专属：节日/电商/平台活动/行业
   end_date?: string;      // event 专属：活动区间结束日
+  persona?: string;      // 关联工作台内容项目；旧自由日历不要求填写
+  task_id?: string;
+  version_id?: string;
 }
 export type ScheduleInput = Omit<ScheduleItem, 'id'>;
 export interface ScheduleContext {
@@ -377,6 +383,30 @@ export function updateSchedule(id: string, item: ScheduleInput): Promise<Schedul
   return request(`/api/schedule/${encodeURIComponent(id)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(item),
   });
+}
+export function canonicalPlatform(name: string = ''): string {
+  return ({'微信公众号':'公众号','微信视频号':'视频号','推特 X':'X'} as Record<string,string>)[name] || name;
+}
+export async function savePublishSchedule(input: ScheduleInput): Promise<ScheduleItem> {
+  const records = await fetchSchedule();
+  const linked = input.persona && input.task_id ? records.filter(item =>
+    item.persona === input.persona && item.task_id === input.task_id &&
+    (item.version_id || '') === (input.version_id || '') && canonicalPlatform(item.platform) === canonicalPlatform(input.platform)) : [];
+  let prior = linked.find(item => item.date === input.date && (item.time || '') === (input.time || ''));
+  if (!prior && input.status === 'published') {
+    const pending = linked.filter(item => item.status !== 'published');
+    if (pending.length > 1) throw new Error('此版本有多个待发布排期，请在内容日历中选择原记录回填');
+    prior = pending[0];
+  }
+  if (prior?.status === 'published' && input.status !== 'published') throw new Error('原记录已发布，不能用存草稿覆盖');
+  const desired = {...prior, ...input};
+  const saved = prior ? await updateSchedule(prior.id, desired) : await createSchedule(desired);
+  const actual = (await fetchSchedule()).find(item => item.id === saved.id);
+  if (!actual || ['title','status','url','note','persona','task_id','version_id','platform'].some(key =>
+    ((actual as unknown as Record<string,unknown>)[key] || '') !== ((desired as unknown as Record<string,unknown>)[key] || ''))) {
+    throw new Error('排期保存后的读回不一致，未确认保存成功，请打开日历核对');
+  }
+  return actual;
 }
 export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
   return request(`/api/schedule/${encodeURIComponent(id)}`, { method: 'DELETE' });

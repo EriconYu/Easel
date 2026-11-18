@@ -32,6 +32,7 @@ export interface StreamState {
 
 /** 发布中心草稿：持久化到 localStorage，切页/刷新都不丢。 */
 export interface PublishDraft {
+  project_source?: {persona:string;task_id:string;version_id:string};
   title: string;
   body: string;
   platforms: string[];

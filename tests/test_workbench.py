@@ -13,6 +13,23 @@ def group(title='为什么人到中年关系变化',url='https://example.test/a'
 def rec(groups=None,**kw):
     return w.recommend('甲',kw.get('intent','关系'),kw.get('exclude',[]),kw.get('budget',30),kw.get('platforms',['公众号']),groups if groups is not None else [group()])
 
+def test_optional_time_is_not_an_ai_duration_or_refresh_period():
+    result = rec(budget=0)
+    card = result['cards'][0]
+    assert 'estimated_minutes' not in card
+    context = w.generation_context('甲', card['task_id'], '讨论', ['公众号'])
+    payload = json.loads(context.split('\n', 1)[1])
+    assert payload['time_preference_minutes'] is None
+    assert not any('minutes' in step for step in payload['plan'])
+
+def test_source_kind_distinguishes_hotlist_from_search():
+    assert rec()['cards'][0]['sources'][0]['kind'] == 'trend'
+    searched = group(platform='主动联网搜索')
+    searched['items'][0]['provider'] = 'DeepSeek Search'
+    source = rec([searched])['cards'][0]['sources'][0]
+    assert source['kind'] == 'search' and source['provider'] == 'DeepSeek Search'
+
+
 def test_chinese_matching_exclusion_zero():
     r=rec();assert not r['cards'][0]['evergreen'];assert '关系' in r['cards'][0]['relevance_reason']
     assert all(c['evergreen'] for c in rec(exclude=['中年'])['cards'])
@@ -38,7 +55,8 @@ def test_tasks_refresh_isolation_feedback_context():
     context=w.generation_context('甲',c['task_id'],'平台稿',['公众号']);payload=json.loads(context.split('\n',1)[1])
     assert payload['recommendation']['sources'] and payload['intent']=='关系' and payload['persona']
     assert payload['format']=='平台稿' and payload['platforms']==['公众号']
-    assert sum(s['minutes'] for s in payload['plan'])<=30 and len(payload['plan'])==3
+    assert payload['time_preference_minutes']==30 and len(payload['plan'])==3
+    assert not any('minutes' in step for step in payload['plan'])
     assert payload['output_path'].startswith('outputs/')
     assert w.tasks('甲')[0]['status']=='doing'
     w.dismiss('甲',c['task_id']);assert all(x['title']!=c['title'] for x in rec()['cards'])

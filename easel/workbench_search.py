@@ -163,7 +163,7 @@ def _parse_results(events: list[dict], days: int, limit: int) -> dict:
     return {"items":out,"warnings":list(dict.fromkeys(warnings))}
 
 
-async def search_topics(query: str, days: int = 3, limit: int = 8) -> dict:
+async def search_topics(query: str, days: int = 3, limit: int = 8, *, model: str = '') -> dict:
     if not isinstance(query, str) or not query.strip() or len(query) > 500:
         raise ValueError("请输入不超过500字的搜索主题")
     if type(days) is not int or days not in {1, 3, 7}:
@@ -191,6 +191,8 @@ async def search_topics(query: str, days: int = 3, limit: int = 8) -> dict:
         schema.write_text(json.dumps(RESULT_SCHEMA), encoding="utf-8")
         env = dict(os.environ)
         args = [command, "exec", "--skip-git-repo-check", "--sandbox", "read-only", "--json"]
+        if model:
+            args.extend(['--model', model])
         for feature in ('shell_tool', 'unified_exec', 'multi_agent', 'computer_use',
                         'browser_use', 'apps', 'plugins', 'hooks', 'skill_search', 'view_image'):
             args.extend(['--disable', feature])

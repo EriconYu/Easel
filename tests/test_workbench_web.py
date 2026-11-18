@@ -9,12 +9,39 @@ from easel import workbench as w
 @pytest.fixture
 def client(tmp_path,monkeypatch):
     monkeypatch.setattr(w,'ROOT',tmp_path/'store')
+    monkeypatch.setattr(web,'OUTPUTS_DIR',tmp_path/'outputs')
     monkeypatch.setattr(w,'profile_exists',lambda n:n=='测试')
     monkeypatch.setattr(w,'load_profile_text',lambda n:'受众关系沟通')
     monkeypatch.setattr(web,'profile_exists',lambda n:n=='测试')
     async def trends(**kwargs):return {'trends':[]}
     monkeypatch.setattr(web,'api_trends',trends)
     return TestClient(web.app,base_url='http://localhost',headers={'origin':next(iter(web._LOCAL_ORIGINS))})
+
+def test_search_settings_are_private_and_independent_of_analysis(client, monkeypatch):
+    monkeypatch.setattr(web, 'read_settings', lambda _: {})
+    before = client.get('/api/workbench/engines').json()
+    secret = 'fixture-key-not-a-real-credential'
+    saved = client.post('/api/workbench/search-settings', json={'provider':'deepseek','api_key':secret})
+    assert saved.status_code == 200 and secret not in saved.text
+    after = client.get('/api/workbench/engines').json()
+    assert after['search']['provider'] == 'deepseek' and after['search']['key_configured']
+    assert secret not in str(after) and after['analysis'] == before['analysis']
+    assert client.post('/api/workbench/search-settings', json={'provider':'codex','clear_key':True}).status_code == 200
+
+
+def test_recommend_search_inherits_easel_codex_model(client, monkeypatch):
+    from easel import workbench_search
+    calls = []
+    async def search(query, *args, **kwargs):
+        calls.append(kwargs)
+        return {'items': [], 'warnings': []}
+    monkeypatch.setattr(workbench_search, 'search_topics', search)
+    monkeypatch.setattr(web, '_harness_settings', lambda: {'models': {'codex': 'selected-model'}})
+    response = client.post('/api/workbench/recommend', json={
+        'persona': '测试', 'intent': '关系', 'budget': 30, 'include_search': True})
+    assert response.status_code == 200
+    assert calls[0]['model'] == 'selected-model'
+
 
 def test_recommend_waits_for_inflight_source(client, monkeypatch):
     calls = []

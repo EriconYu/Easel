@@ -8,6 +8,8 @@ import type { UploadedFile } from '../lib/api';
 import { IconArrowUp, IconStop, IconPlus, IconFile } from './icons';
 
 interface ChatPageProps {
+  projectTitle?: string;
+  onBackProject?: () => Promise<void>;
   apiDirect: boolean;
   session: ChatSession;
   stream?: StreamState;          // 进行中的流式态（来自 App，切页也不丢）
@@ -37,7 +39,8 @@ function greeting(): string {
   return `${g}，想创作点什么？`;
 }
 
-export default function ChatPage({ apiDirect, session, stream, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed }: ChatPageProps) {
+export default function ChatPage({ apiDirect, session, stream, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed, projectTitle, onBackProject }: ChatPageProps) {
+  const [projectError, setProjectError] = useState('');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<UploadedFile[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -176,10 +179,15 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
     </div>
   );
 
+  const projectBar = <div className="workbench-meta" style={{padding:'8px 20px'}}>
+    {projectTitle ? <>内容项目：{projectTitle} <button onClick={() => { void onBackProject?.().catch(e => setProjectError(String(e.message || e))); }}>返回内容项目</button> · 对话结束后在项目里取回正文、审核并另存版本。</> : '自由对话：不会自动建立内容项目或保存正式稿件。正式创作请从灵感或热点进入内容项目。'}
+    {projectError && <p role="alert">{projectError}</p>}
+  </div>;
   // ---- 空态：居中欢迎页 ----
   if (isEmpty) {
     return (
       <div className="chat-page">
+        {projectBar}
         <div className="chat-hero">
           <div className="chat-hero-brand">
             <img src="./static/easel-icon-transparent.png" alt="" />
@@ -212,6 +220,7 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
 
   return (
     <div className="chat-page">
+        {projectBar}
       <div className="chat-messages">
         <div className="chat-thread">
           {displayMessages.map((msg, i) => {

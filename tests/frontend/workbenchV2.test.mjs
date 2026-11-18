@@ -48,7 +48,37 @@ function editor(overrides = {}) {
   h.render();h.effects[0]();
   return {...h,calls};
 }
-test('推荐发送时间和默认搜索，AI失败保留规则结果', async()=>{
+test('搜索设置独立保存并重新读回，不修改分析模型', async()=>{
+  const calls=[]; let reads=0;
+  const info={search:{provider:'codex',key_configured:false,providers:[{id:'codex',label:'Codex',configured:true},{id:'deepseek',label:'DeepSeek',configured:true}]},analysis:{runtime:'api',model:'deepseek-chat',label:'API直连'}};
+  const h=harness('components/WorkbenchEngines.tsx',{
+    fetchWorkbenchEngines:async()=>{reads++;return {...info,search:{...info.search,provider:reads>1?'deepseek':'codex'}};},
+    saveWorkbenchSearchSettings:async body=>calls.push(body),
+  },{onSearchReady:()=>{}});
+  h.render();h.effects[0]();await tick();
+  h.input('搜索供应商').props.onChange({target:{value:'deepseek'}});
+  h.input('DeepSeek Search Key').props.onChange({target:{value:'fixture-key'}});
+  h.button('保存搜索设置').props.onClick();await tick();
+  assert.equal(reads,2);assert.equal(calls[0].provider,'deepseek');
+  assert.equal(calls[0].runtime,undefined);assert.equal(h.input('DeepSeek Search Key').props.value,'');
+});
+test('推荐等待时按钮旁显示具体步骤，完成后恢复操作', async()=>{
+  let finish;
+  const h=harness('components/WorkbenchPanel.tsx', {
+    fetchWorkbench:async()=>({recommendations:recommendation,tasks:[]}),
+    recommendWorkbench:()=>new Promise(resolve=>{finish=resolve;}),
+  }, {persona:'甲',onGenerateWorkbench:async()=>{},onContinueWorkbench:async()=>{},onNavigate:()=>{}});
+  h.render();h.effects[0]();await tick();
+  h.button('生成基础推荐').props.onClick();await tick();
+  assert.ok(h.button('生成推荐中…'));
+  const nodes=h.render();
+  const status=nodes.findIndex(n=>n.props?.role==='status' && /正在生成推荐/.test(n.props.children));
+  assert.ok(status>=0 && status<nodes.findIndex(n=>n.props?.children==='关系变化'));
+  finish(recommendation);await tick();
+  assert.ok(h.button('生成基础推荐'));
+  assert.equal(h.render().find(n=>n.type==='fieldset').props.disabled,false);
+});
+test('热榜推荐与联网搜索显式分开，AI失败保留规则结果', async()=>{
   const calls=[];
   const h=harness('components/WorkbenchPanel.tsx', {
     fetchWorkbench:async()=>({recommendations:recommendation,tasks:[task]}),
@@ -57,8 +87,11 @@ test('推荐发送时间和默认搜索，AI失败保留规则结果', async()=>
   }, {persona:'甲',onGenerateWorkbench:async()=>{},onContinueWorkbench:async()=>{},onNavigate:()=>{}});
   h.render();h.effects[0]();await tick();
   h.input('来源时间').props.onChange({target:{value:'7'}});
-  h.button('生成并保存推荐').props.onClick();await tick();
-  assert.equal(calls[0].days,7);assert.equal(calls[0].include_search,true);
+  h.button('生成基础推荐').props.onClick();await tick();
+  assert.equal(calls[0].days,7);assert.equal(calls[0].include_search,false);
+  h.render().find(n=>n.props?.onSearchReady).props.onSearchReady(true);
+  h.button('联网补充推荐').props.onClick();await tick();
+  assert.equal(calls[1].include_search,true);
   h.button('AI分析选题').props.onClick();await tick();
   assert.ok(h.render().some(node=>node.props?.children==='模型不可用'));
   assert.ok(h.render().some(node=>node.props?.children==='关系变化'));
@@ -91,8 +124,8 @@ test('取回真实稿新增版本，选择历史与导航', async()=>{
   h.input('版本名').props.onChange({target:{value:'修订版'}});
   h.button('保存新版本').props.onClick();await tick();
   assert.deepEqual(h.calls.find(call=>call[0]==='version'),['version','甲','a','修订版','真实对话稿']);
-  h.button('进入内容库').props.onClick();h.button('前往公众号发布页').props.onClick();
-  assert.deepEqual(h.calls.slice(-2),[['navigate','outputs'],['navigate','publish']]);
+ assert.equal(h.button('前往公众号发布页'),undefined);
+ assert.equal(h.calls.filter(call=>call[0]==='navigate').length,0);
 });
 test('运行中不会取回未完成文本', async()=>{
   const h=editor({fetchLastTurn:async()=>({status:'running',text:'未完成文本'})});await tick();
@@ -102,7 +135,7 @@ test('运行中不会取回未完成文本', async()=>{
 });
 test('App沿用服务端会话ID，本地缺失恢复原ID，完整context仅发模型', async()=>{
   const source=read('App.tsx');
-  const block=source.slice(source.indexOf('  const handleGenerateWorkbench'),source.indexOf('  const handleContinueWorkbench'));
+  const block=source.slice(source.indexOf('  const handleGenerateWorkbench'),source.indexOf('  const handleStopStream'));
   for (const local of [[],[{id:'server-session',persona:'甲',messages:[{role:'assistant',content:'历史'}],created:1}]]) {
     const calls=[];let sessions=local;
     const sandbox={
@@ -151,7 +184,7 @@ test('工作台v2 API端点和参数，目录只提交ID', async()=>{
 });
 test('新任务创建绑定一次会话，之后生成复用已有会话', async()=>{
   const source=read('App.tsx');
-  const block=source.slice(source.indexOf('  const handleGenerateWorkbench'),source.indexOf('  const handleContinueWorkbench'));
+  const block=source.slice(source.indexOf('  const handleGenerateWorkbench'),source.indexOf('  const handleStopStream'));
   const calls=[];let serverTasks=[];let created=0;
   const sandbox={
     useCallback:fn=>fn,selectedPersona:'甲',contextWorkbench:async()=>({context:'上下文'}),

@@ -5084,6 +5084,8 @@ VIDEO_ONLY_PUBLISH = {"douyin", "weixin-channels", "bilibili"}   # 只能发视�
 
 
 class PublishRequest(BaseModel):
+    task_id: str = ''
+    version_id: str = ''
     title: str = ''
     body: str = ''
     media: list[str] = []
@@ -5094,11 +5096,24 @@ class PublishRequest(BaseModel):
 
 
 class ManualPublishRequest(BaseModel):
+    persona: str = ''
+    task_id: str = ''
+    version_id: str = ''
     title: str = Field(default='', max_length=1000)
     body: str = Field(default='', max_length=100000)
     tags: str = Field(default='', max_length=2000)
     media: list[str] = Field(default_factory=list, max_length=32)
     reviewed: StrictBool = False
+
+
+def _publish_project_link(req) -> dict:
+    if not req.task_id and not req.version_id:
+        return {}
+    from easel.project_schedule import validate_link
+    try:
+        return validate_link({key: getattr(req, key) for key in ('persona', 'task_id', 'version_id')})
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
 
 
 @app.get("/api/publishing-policy")
@@ -5115,11 +5130,16 @@ def _require_automated_publishing() -> None:
 @app.post("/api/manual-publish/{platform}/export")
 def api_manual_publish_export(platform: str, req: ManualPublishRequest):
     """Build a local handoff package; never contact a platform or mark it published."""
+    link = _publish_project_link(req)
     try:
         package = build_package(OUTPUTS_DIR, platform, req.title, req.body,
                                 req.tags, req.media, req.reviewed)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
+    if link:
+        import zipfile
+        with zipfile.ZipFile(package, 'a') as archive:
+            archive.writestr('project-source.json', json.dumps(link, ensure_ascii=False))
     return {"path": package.relative_to(OUTPUTS_DIR.resolve()).as_posix(),
             "filename": package.name, "published": False}
 
@@ -5149,14 +5169,29 @@ def _read_publish_status(platform: str) -> dict:
 
 def _record_successful_publish(title: str, body: str, cfg: dict, profile: str = '',
                                tags: str = '', ptype: str = '',
-                               status: str = 'published') -> None:
+                               status: str = 'published', project_link: dict | None = None) -> None:
     try:
+        from easel.project_schedule import canonical_platform
+        platform_name = canonical_platform(cfg['name'])
+        if project_link:
+            with _schedule_lock():
+                items = _read_schedule()
+                matches = [item for item in items if all(item.get(k) == v for k, v in project_link.items()) and canonical_platform(item.get('platform')) == platform_name and item.get('status') != 'published']
+                item = matches[0] if len(matches) == 1 else {'id':uuid.uuid4().hex[:12], 'title':title, 'date':time.strftime('%Y-%m-%d'), 'time':'', 'platform':platform_name, 'kind':'content', 'source':'publish-page', **project_link}
+                if len(matches) != 1:
+                    items.append(item)
+                item['status'] = 'scheduled' if status == 'draft' and item.get('status') == 'scheduled' else status
+                item['publication_status'] = status
+                item['publication_note'] = body[:200]
+                item['publication_recorded_at'] = time.strftime('%Y-%m-%dT%H:%M:%S%z')
+                _write_schedule(items)
+            return
         scripts_dir = str(SHARED_SCRIPTS)
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
         import calendar_ops
         with _schedule_lock():
-            calendar_ops.record_publish(cfg['name'], title, note=body[:200],
+            calendar_ops.record_publish(platform_name, title, note=body[:200],
                                         tags=tags, ptype=ptype,
                                         source='publish-page', profile=profile,
                                         data_path=SCHEDULE_FILE, forward_log=status == 'published',
@@ -5167,7 +5202,7 @@ def _record_successful_publish(title: str, body: str, cfg: dict, profile: str = 
 
 def _run_publish_bg(platform: str, cmd: list, title: str, body: str, cfg: dict,
                     status_file: Path, code_file: Path, profile: str = '',
-                    tags: str = '', ptype: str = '') -> None:
+                    tags: str = '', ptype: str = '', project_link: dict | None = None) -> None:
     """后台线程跑发布脚本（脚本自身把 starting/sms_required/verifying/success/error 写进 status_file）。
     结束后兜底补写终态 + 记 _publish.log + 成功则回流排期。"""
     ok = False
@@ -5196,12 +5231,12 @@ def _run_publish_bg(platform: str, cmd: list, title: str, body: str, cfg: dict,
     except OSError:
         pass
     if ok:
-        _record_successful_publish(title, body, cfg, profile, tags, ptype)
+        _record_successful_publish(title, body, cfg, profile, tags, ptype, project_link=project_link)
 
 
 def _start_async_publish(platform: str, cmd: list, title: str, body: str, cfg: dict,
                          status_file: Path, code_file: Path, profile: str = '',
-                         tags: str = '', ptype: str = '') -> dict:
+                         tags: str = '', ptype: str = '', project_link: dict | None = None) -> dict:
     """启动异步发布：清旧码/状态 → 起后台线程 → 立即返回。前端轮询 /api/publish/{p}/status，
     遇 sms_required 弹输入框、提交到 /api/publish/{p}/sms。"""
     try:
@@ -5210,7 +5245,7 @@ def _start_async_publish(platform: str, cmd: list, title: str, body: str, cfg: d
         pass
     _write_publish_status(status_file, 'starting', '发布中…（若触发风控会要求短信验证）')
     threading.Thread(target=_run_publish_bg,
-                     args=(platform, cmd, title, body, cfg, status_file, code_file, profile, tags, ptype),
+                     args=(platform, cmd, title, body, cfg, status_file, code_file, profile, tags, ptype, project_link),
                      daemon=True).start()
     # 关键：**不返回 ok:true**——这只是「已启动」的应答，真正结果要靠轮询 /status。
     # 若这里给 ok:true，旧前端会把它当「已发布」立刻显示成功（假成功 bug，真机踩过）。
@@ -5243,6 +5278,7 @@ async def api_publish_sms(platform: str, req: SmsCodeRequest):
 async def api_publish(platform: str, req: PublishRequest):
     """一键发布：分发到对应 publisher 脚本真发（--exec）。二次确认在前端。"""
     _require_automated_publishing()
+    project_link = _publish_project_link(req)
     cfg = LOGIN_RUNNERS.get(platform)
     if not cfg:
         raise HTTPException(404, '未知平台')
@@ -5272,8 +5308,8 @@ async def api_publish(platform: str, req: PublishRequest):
         raise HTTPException(400, f"{cfg['name']} 只能发视频，请附带一个视频文件")
     title = req.title.strip() or req.body.strip()[:20]
     tags = req.tags or ''
-    # 仅今日头条支持草稿；其他平台的草稿请求已在上面拒绝。
-    is_draft = platform == 'toutiao' and req.draft
+    # 公众号建草稿不是发表；头条按显式请求执行。
+    is_draft = platform == 'wechat-oa' or (platform == 'toutiao' and req.draft)
     publish_type = '视频' if vids else ('文章' if platform == 'wechat-oa' else '图文')
     py = sys.executable
     if platform == 'xiaohongshu':
@@ -5298,7 +5334,7 @@ async def api_publish(platform: str, req: PublishRequest):
         code_file = PUBLISH_DIR / 'douyin.code'
         cmd += ['--status-file', str(status_file), '--sms-code-file', str(code_file)]
         return _start_async_publish(platform, cmd, title, req.body, cfg, status_file, code_file,
-                                    profile, tags, publish_type)
+                                    profile, tags, publish_type, project_link=project_link)
     elif platform == 'toutiao':
         # 头条图文：正文走 --content 直传（不落临时文件）。一键发布 → --exec；
         # 发布页选了「存草稿」时改用 --draft（只落后台草稿箱，不点发布按钮）。
@@ -5377,7 +5413,7 @@ async def api_publish(platform: str, req: PublishRequest):
         pass
     if ok:
         _record_successful_publish(title, req.body, cfg, profile, tags, publish_type,
-                                   status='draft' if is_draft else 'published')
+                                   status='draft' if is_draft else 'published', project_link=project_link)
     return {'ok': ok, 'message': ('已存草稿' if is_draft else '发布成功') if ok else '发布失败（见 detail）',
             'detail': detail}
 
@@ -5648,12 +5684,39 @@ async def _workbench_trends():
     return {**collection, 'trends': list(groups.values())}
 
 
+@app.get('/api/workbench/engines')
+async def api_workbench_engines():
+    from easel.search_providers import public_search_settings
+    env = read_settings(ENV_FILE)
+    config = _harness_settings()
+    runtime = config['runtime']
+    model = env.get('EASEL_DIRECT_API_MODEL', '') if runtime == 'api' else config['models'].get(runtime, '')
+    return {'search': public_search_settings(OUTPUTS_DIR, env),
+            'analysis': {'runtime': runtime, 'model': model, 'label': {'api':'API直连','codex':'Codex','claude':'Claude Code','opencode':'OpenCode'}.get(runtime, runtime)}}
+
+
+class WorkbenchSearchSettingsRequest(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    provider: str = Field(pattern='^(codex|deepseek)$')
+    api_key: str | None = Field(default=None, max_length=1024)
+    clear_key: bool = False
+
+
+@app.post('/api/workbench/search-settings')
+async def api_workbench_search_settings(req: WorkbenchSearchSettingsRequest):
+    from easel.search_providers import save_search_settings
+    try:
+        return save_search_settings(OUTPUTS_DIR, read_settings(ENV_FILE), req.provider, req.api_key, req.clear_key)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+
+
 class WorkbenchRecommendRequest(BaseModel):
     model_config = {"strict": True, "extra": "forbid"}
     persona: str
     intent: str = Field(min_length=1, max_length=500)
     exclude: list[str] = Field(default_factory=list, max_length=20)
-    budget: int = 60
+    budget: int = 0
     platforms: list[str] = Field(default_factory=list, max_length=8)
     days: int = Field(default=3, ge=1, le=7)
     include_search: bool = False
@@ -5690,13 +5753,18 @@ async def api_workbench_recommend(req: WorkbenchRecommendRequest):
     search_warnings = []
     if req.include_search:
         try:
-            from easel.workbench_search import search_topics
-            search_result = await search_topics(req.intent, days=req.days, limit=8)
+            from easel.search_providers import search_topics
+            search_result = await search_topics(req.intent, days=req.days, limit=8,
+                                                outputs=OUTPUTS_DIR, environment=read_settings(ENV_FILE),
+                                                model=_harness_settings()['models'].get('codex', ''))
             search_warnings = search_result.get('warnings', [])
             groups.append({'platform': '主动联网搜索', 'label': '主动联网搜索',
                            'ok': bool(search_result.get('items')), 'items': search_result.get('items', []),
                            'fetched_at': workbench.now(),
                            'error': {'message': '；'.join(search_warnings) or '没有符合范围的搜索线索'}})
+        except ValueError as error:
+            search_warnings = [str(error)]
+            groups.append({'platform': '主动联网搜索', 'ok': False, 'error': {'message': search_warnings[0]}})
         except Exception:
             search_warnings = ['搜索底座调用失败，未伪造搜索结果']
             groups.append({'platform': '主动联网搜索', 'ok': False, 'error': {'message': search_warnings[0]}})
@@ -5820,20 +5888,31 @@ def _read_schedule() -> list[dict]:
         return []
     try:
         d = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
-        return d if isinstance(d, list) else []
-    except Exception:
-        return []
+        if not isinstance(d, list) or any(not isinstance(item, dict) for item in d):
+            raise ValueError('invalid calendar')
+        return d
+    except (ValueError, OSError):
+        raise HTTPException(500, '日历数据损坏或不可读，已停止写入以保护原记录') from None
 
 
 def _write_schedule(items: list[dict]) -> None:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SCHEDULE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(SCHEDULE_FILE)
+    tmp = SCHEDULE_FILE.with_name(f'.{SCHEDULE_FILE.name}.{uuid.uuid4().hex}.tmp')
+    try:
+        with tmp.open('x', encoding='utf-8') as stream:
+            json.dump(items, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        tmp.replace(SCHEDULE_FILE)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class ScheduleItem(BaseModel):
     title: str
+    persona: str = ''
+    task_id: str = ''
+    version_id: str = ''
     date: str
     platform: str = ""
     time: str = ""
@@ -5853,6 +5932,11 @@ async def api_schedule_list():
 
 @app.post("/api/schedule")
 async def api_schedule_create(req: ScheduleItem):
+    from easel.project_schedule import validate_link, duplicate
+    try:
+        link = validate_link(req.model_dump())
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
     with _schedule_lock():
         items = _read_schedule()
         kind = req.kind if req.kind in SCHEDULE_KINDS else "content"
@@ -5870,7 +5954,13 @@ async def api_schedule_create(req: ScheduleItem):
             "source": req.source if req.source in {"manual", "publish-page", "chat", "scheduler"} else "manual",
             "event_type": req.event_type,
             "end_date": req.end_date,
+            **link,
         }
+        prior = duplicate(items, item)
+        if prior is not None:
+            if any((prior.get(k) or '') != (item.get(k) or '') for k in ('title','status','url','note')):
+                raise HTTPException(409, '排期已存在；请更新原记录，不能用重复创建覆盖状态或发布回填')
+            return prior
         items.append(item)
         _write_schedule(items)
     return item
@@ -5882,6 +5972,11 @@ async def api_schedule_update(sid: str, req: ScheduleItem):
         items = _read_schedule()
         for it in items:
             if it.get("id") == sid:
+                from easel.project_schedule import validate_link
+                try:
+                    link = validate_link(req.model_dump(), it)
+                except ValueError as error:
+                    raise HTTPException(400, str(error)) from None
                 kind = req.kind if req.kind in SCHEDULE_KINDS else it.get("kind", "content")
                 it.update({
                     "title": req.title.strip() or it.get("title", "未命名"),
@@ -5894,6 +5989,7 @@ async def api_schedule_update(sid: str, req: ScheduleItem):
                     "url": req.url,
                     "event_type": req.event_type,
                     "end_date": req.end_date,
+                    **link,
                 })
                 _write_schedule(items)
                 return it
@@ -6021,4 +6117,4 @@ if __name__ == "__main__":
     print()
     # 监听 0.0.0.0（非仅回环）是为了兼容 Docker/远程容器端口转发访问 Easel 的场景；
     # local_write_guard/TrustedHostMiddleware 只挡浏览器发起的跨站请求，见其注释里的局限说明。
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+    uvicorn.run(app, host=os.environ.get('EASEL_HOST', '0.0.0.0'), port=port, log_level="warning")

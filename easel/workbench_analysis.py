@@ -11,7 +11,7 @@ from .harnesses.store import settings
 from .direct_api import stream_chat
 
 
-def apply_analysis(persona, expected_ids, answer):
+def apply_analysis(persona, expected_ids, answer, *, engine=None):
     text = answer.strip()
     if text.startswith('```'):
         text = text.split('\n', 1)[1].rsplit('```', 1)[0]
@@ -47,6 +47,8 @@ def apply_analysis(persona, expected_ids, answer):
                 card['title'] = row['title'].strip()
             card.update(relevance_reason=row['reason'], angle=row['angle'], risk=row['risk'])
             card['analysis_evidence'] = '模型根据所列线索提出的判断；不代表来源全文已核验'
+            card['analyzed_at'] = workbench.now()
+            card['analysis_engine'] = deepcopy(engine)
             updated.append(card)
         data['recommendations'].update(cards=updated, ranking='AI分析（来源仍需核验）', analyzed_at=workbench.now())
         workbench._write(persona, data)
@@ -104,4 +106,5 @@ async def analyze_topics(persona: str, project_root: Path, environment: dict) ->
             raise ValueError('AI选题分析超时，已保留原推荐') from error
     else:
         raise ValueError('当前底座暂不支持独立选题分析，可进入创作讨论继续分析')
-    return apply_analysis(persona, expected, ''.join(tokens))
+    engine = {'runtime': config['runtime'], 'model': environment.get('EASEL_DIRECT_API_MODEL', '') if config['runtime'] == 'api' else config['models'].get(config['runtime'], '')}
+    return apply_analysis(persona, expected, ''.join(tokens), engine=engine)

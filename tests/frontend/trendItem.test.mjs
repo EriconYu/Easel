@@ -47,9 +47,9 @@ test('热点操作保留完整来源，并分别触发收藏与工作台导入',
   assert.equal(link.props.title, title);
   assert.equal(link.props.href, item.url);
   assert.equal(save.props['aria-label'], `收藏选题：${title}`);
-  assert.equal(use.props['aria-label'], `带来源讨论：${title}`);
+  assert.equal(use.props['aria-label'], `进入内容项目：${title}`);
   assert.equal(use.props.children[0].type, 'chat');
-  assert.equal(use.props.children[1].props.children, '带来源讨论');
+  assert.equal(use.props.children[1].props.children, '进入内容项目');
   use.props.onClick();
   await save.props.onClick();
   assert.equal(app.topics[0].title, title);

@@ -96,6 +96,22 @@ def test_redirect_is_checked_before_private_destination(monkeypatch):
     assert checked == ['https://example.com/start', 'http://127.0.0.1/private']
 
 
+def test_search_uses_explicitly_selected_codex_model(monkeypatch):
+    calls = []
+    class Process:
+        returncode = 0
+        async def communicate(self):
+            return b'', b''
+    async def spawn(*args, **kwargs):
+        calls.append(args)
+        return Process()
+    monkeypatch.setattr(search.shutil, 'which', lambda _: '/fake/codex')
+    monkeypatch.setattr(search.asyncio, 'create_subprocess_exec', spawn)
+    asyncio.run(search.search_topics('关系', model='selected-model'))
+    args = calls[0]
+    assert args[args.index('--model') + 1] == 'selected-model'
+
+
 def test_validation_and_missing_provider(monkeypatch):
     import pytest
     for args in [('',3,2), ('x',30,2), ('x',True,2), ('x',3,50)]:

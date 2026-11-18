@@ -18,7 +18,7 @@ export interface WorkbenchDiscussionProps {
 }
 const formats: WorkbenchFormat[] = ['母稿', '口播', '平台稿'];
 
-export function DiscussionEditor({ persona, taskId, onAction, onNavigate, discussionLabel = '继续讨论' }: WorkbenchDiscussionProps) {
+export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = '继续讨论' }: WorkbenchDiscussionProps) {
   const [brief, setBrief] = useState<WorkbenchBrief | null>(null);
   const [skills, setSkills] = useState<WorkbenchSkill[]>([]);
   const [documents, setDocuments] = useState<WorkbenchDocument[]>([]);
@@ -152,10 +152,9 @@ export function DiscussionEditor({ persona, taskId, onAction, onNavigate, discus
           setVersions((await fetchWorkbenchVersions(persona, taskId)).items);
           setNotice('已新增独立版本，原稿与历史版本均保留。');
         })}>保存新版本</button>
-        <button onClick={() => onNavigate('outputs')}>进入内容库</button>
-        <button onClick={() => onNavigate('publish')}>前往公众号发布页</button>
+
       </div>
-      <p className="workbench-muted">进入发布页后请自行选择公众号并审核，不会自动发布。</p>
+      <p className="workbench-muted">保存版本后，请在项目下方明确选择交付版本，再交给发布页审核；不会自动发布。</p>
     </fieldset>}
   </div>;
 }

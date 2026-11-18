@@ -1,15 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  createSchedule, executeSkill, runAgent, streamChat,
+  savePublishSchedule, executeSkill, runAgent, streamChat,
   fetchAccounts, publishNow, publishStatus, submitPublishSms, fetchOutputs, mediaUrl,
 } from '../lib/api';
 import type { AccountItem, OutputFile } from '../lib/api';
 import { loadPublishDraft, savePublishDraft } from '../lib/store';
+import ProjectPublishSource from './ProjectPublishSource';
+import type { ProjectPublishDraft } from './ProjectPublishSource';
 import { renderMarkdown } from '../lib/sanitize';
 import { IconPublish, IconCopy, IconCheck, IconCalendar, IconSkills, IconEdit, IconStop, IconTrash } from './icons';
 
 interface PublishPageProps {
   persona: string;
+  projectDraft?: ProjectPublishDraft;
 }
 
 // 平台列表须与后端 LOGIN_RUNNERS 对齐（有登录/发布链路的才列）
@@ -45,8 +48,9 @@ function parseSections(text: string): Record<string, string> {
 
 type PubState = { status: 'publishing' | 'ok' | 'fail'; msg: string };
 
-export default function PublishPage({ persona }: PublishPageProps) {
+export default function PublishPage({ persona, projectDraft }: PublishPageProps) {
   const draft0 = loadPublishDraft();
+  const [projectSource, setProjectSource] = useState(draft0.project_source);
   const [title, setTitle] = useState(draft0.title);
   const [body, setBody] = useState(draft0.body);
   const [platforms, setPlatforms] = useState<string[]>(draft0.platforms);
@@ -80,8 +84,8 @@ export default function PublishPage({ persona }: PublishPageProps) {
 
   // 草稿持久化：任何改动即写 localStorage，切页/刷新回来都在
   useEffect(() => {
-    savePublishDraft({ title, body, platforms, overrides, tags });
-  }, [title, body, platforms, overrides, tags]);
+    savePublishDraft({ title, body, platforms, overrides, tags, project_source:projectSource });
+  }, [title, body, platforms, overrides, tags, projectSource]);
 
   const cleanupPublishActivity = useCallback(() => {
     // 卸载：中止流 + 停掉所有发布状态轮询（否则在后台空转最长 15 分钟）
@@ -196,6 +200,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
 
   // D. 一键发布（真发布，二次确认）
   const publishAll = async () => {
+    if (projectSource && projectSource.persona !== persona) { showToast('源稿属于另一个画像，请从正确内容项目重新载入'); return; }
     if (empty || publishing || checking) return;
     const targets = PLATFORMS.filter((p) => platforms.includes(p.key) && PUBLISHABLE.has(p.key));
     if (targets.length === 0) {
@@ -242,7 +247,8 @@ export default function PublishPage({ persona }: PublishPageProps) {
       }
       setPub((r) => ({ ...r, [t.key]: { status: 'publishing', msg: asDraftThis ? '存草稿中…可能需 1-2 分钟' : '发布中…可能需 1-2 分钟' } }));
       try {
-        const res = await publishNow(t.key, { title, body: effective(t.key), media: selectedMedia, tags, persona, draft: asDraftThis });
+        const payload = {title,body:effective(t.key),media:selectedMedia,tags,persona,draft:asDraftThis,...projectSource};
+        const res = await publishNow(t.key, payload);
         if (res.async) {
           // 抖音：异步发布，轮询状态；风控触发短信墙时弹输入框（条件触发，没触发就直接跑完）
           await pollAsyncPublish(t.key, t.label);
@@ -318,9 +324,10 @@ export default function PublishPage({ persona }: PublishPageProps) {
     // 用本地日期（日历页按本地渲染）：toISOString 是 UTC，东八区 0-8 点会落到「昨天」
     const d = new Date();
     const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    await createSchedule({
+    await savePublishSchedule({
       title: title.trim() || effective(key).slice(0, 20), date,
       platform: PLATFORMS.find((p) => p.key === key)?.label || '', time: '', status: 'draft', note: effective(key),
+      ...projectSource,
     });
     showToast('已存为草稿并加入今天的日历');
   };
@@ -333,6 +340,8 @@ export default function PublishPage({ persona }: PublishPageProps) {
     <div className="publish-page">
       <div className="publish-editor">
         <h1 className="page-title"><IconPublish size={21} /> 发布中心</h1>
+        <ProjectPublishSource draft={projectDraft} persona={persona} onImport={d=>{setTitle(d.title);setBody(d.text);setOverrides({});setTags('');setSelectedMedia([]);setProjectSource({persona:d.persona,task_id:d.task_id,version_id:d.version_id});}} />
+        {projectSource && <p className="page-subtitle">关联内容项目：{projectSource.task_id} · 源稿版本：{projectSource.version_id}。适配编辑不修改源稿。</p>}
         <p className="page-subtitle">一次编辑 → AI 一键改写成各平台版本 → 预检 → 附媒体 → 一键真发布。</p>
 
         <label className="field-label">标题</label>
@@ -413,7 +422,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
             <IconPublish size={14} /> {publishing ? '发布中…' : '一键发布'}
           </button>
           <button className="btn btn-sm btn-ghost" disabled={empty || adapting}
-            onClick={() => { setTitle(''); setBody(''); setTags(''); setOverrides({}); setCheckResult(''); setPub({}); showToast('已清空'); }}>
+            onClick={() => { setProjectSource(undefined); setTitle(''); setBody(''); setTags(''); setOverrides({}); setCheckResult(''); setPub({}); showToast('已清空'); }}>
             <IconTrash size={13} /> 清空
           </button>
         </div>

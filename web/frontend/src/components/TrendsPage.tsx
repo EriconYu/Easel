@@ -6,7 +6,6 @@ import { IconFire, IconRefresh, IconBookmark, IconCheck, IconChat } from './icon
 import TrendSourcesDialog from './TrendSourcesDialog';
 import ContentPanel from './ContentPanel';
 import WorkbenchPanel from './WorkbenchPanel';
-import type { WorkbenchCard, WorkbenchFormat, WorkbenchTask } from '../lib/api';
 import { importRadarSource } from '../lib/radar';
 import type { RadarSource } from '../lib/radar';
 import type { Page } from './Sidebar';
@@ -14,8 +13,7 @@ import './TrendsPage.css';
 
 interface TrendsPageProps {
   persona: string;
-  onGenerateWorkbench: (card: WorkbenchCard, format: WorkbenchFormat, platforms: string[]) => Promise<void>;
-  onContinueWorkbench: (task: WorkbenchTask, format: WorkbenchFormat, platforms: string[]) => Promise<void>;
+  onOpenProject: (taskId: string) => Promise<void>;
   onNavigate: (page: Page) => void;
 }
 
@@ -35,20 +33,18 @@ function RadarPanel(props: TrendsPageProps) {
   const [view, setView] = useState<'persona' | 'raw'>('persona');
   const [error, setError] = useState('');
   const [importing, setImporting] = useState(false);
-  const [revision, setRevision] = useState(0);
   const importSource = async (source: RadarSource) => {
     if (!props.persona || importing) return;
     setImporting(true); setError('');
     try {
-      await importRadarSource(props.persona, source);
-      setRevision(value => value + 1);
-      setView('persona');
+      const task = await importRadarSource(props.persona, source);
+      await props.onOpenProject(task.task_id);
     } catch (e) { setError(e instanceof Error ? e.message : '导入失败'); }
     finally { setImporting(false); }
   };
   return <div className="page-scroll trends-page">
     <div className="page-head"><div><h1 className="page-title"><IconFire size={22} /> 热点雷达</h1>
-      <p className="page-subtitle">意愿搜索 → 画像匹配 → AI 分析 → 带来源讨论 → 生成稿件；与首页共用同一工作台。</p>
+      <p className="page-subtitle">查找来源与筛选选题；确定后进入同一个内容项目，统一讨论、依据与稿件。</p>
       <p className="page-subtitle">{props.persona ? `当前画像：${props.persona}` : '当前未选择画像：请先选择画像，再进行个性化选题。'}</p>
     </div>{!props.persona && <button className="btn" onClick={() => props.onNavigate('profile')}>选择画像</button>}</div>
     <div className="trend-platforms" role="group" aria-label="热点雷达视图">
@@ -58,7 +54,7 @@ function RadarPanel(props: TrendsPageProps) {
     {error && <p className="notice-error" role="alert">{error}</p>}
     {view === 'persona' ? <>
       <p className="workbench-muted">搜索词使用今日意愿，画像用于规则匹配及后续 AI 分析，不会把整份画像上传给搜索。点击按钮才开始搜索或模型调用；没有相关热点不凑数。下方显示已保存的意愿与筛选条件。</p>
-      <WorkbenchPanel key={`${props.persona}:${revision}`} {...props} />
+      <WorkbenchPanel key={props.persona} persona={props.persona} onOpenProject={props.onOpenProject} />
     </> : <>
       <p className="workbench-muted">全网原始热榜：按来源采集和原榜顺序展示，非 AI 推荐，不代表与当前画像相关。导入只保存线索，不会自动调用模型。</p>
       <TrendsPanel persona={props.persona} importing={importing} onImportSource={importSource} />
@@ -147,7 +143,7 @@ function TrendsPanel({ persona, importing, onImportSource }: {persona: string; i
         <div>
           <h2 className="page-title">全网原始热榜</h2>
           <p className="page-subtitle">
-            选择数据源查看原始线索；导入后在画像工作台核验、分析、讨论和创作。
+            选择数据源查看原始线索；导入后进入内容项目核验、讨论和创作，不会自动调用模型。
             {updated > 0 && <span style={{ color: 'var(--text-tertiary)' }}> · {new Date(updated * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 查询</span>}
           </p>
         </div>
@@ -200,11 +196,11 @@ function TrendsPanel({ persona, importing, onImportSource }: {persona: string; i
                       onClick={() => save(`${g.platform}:${it.id}`, it.title, g.label)}>
                       {saved.has(`${g.platform}:${it.id}`) ? <IconCheck size={14} /> : <IconBookmark size={14} />}
                     </button>
-                    <button className="trend-use" title={persona ? '带来源导入工作台，再讨论或生成' : '请先选择画像'} aria-label={`带来源讨论：${it.title}`}
+                    <button className="trend-use" title={persona ? '保存原始来源并进入内容项目，不自动调用模型' : '请先选择画像'} aria-label={`进入内容项目：${it.title}`}
                       disabled={!persona || importing}
                       onClick={() => onImportSource({id: it.id, title: it.title, url: it.url,
                         platform: g.platform, label: g.label, published_at: it.published_at,
-                        fetched_at: g.fetched_at, hot: it.hot})}><IconChat size={14} /><span>带来源讨论</span></button>
+                        fetched_at: g.fetched_at, hot: it.hot})}><IconChat size={14} /><span>进入内容项目</span></button>
                   </div>
                 </div>
               ))}
