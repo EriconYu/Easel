@@ -5,7 +5,8 @@ import ContentPanel from './ContentPanel';
 import WorkbenchEngines from './WorkbenchEngines';
 import './WorkbenchPanel.css';
 
-const platforms = ['通用', '小红书', '公众号', '抖音', '视频号', 'B站', '微博', '知乎'];
+import { CREATION_PLATFORMS, platformNotice } from '../lib/platformCapabilities';
+const platforms = CREATION_PLATFORMS;
 function sourceLabel(card: WorkbenchCard) {
   if (card.evergreen) return '常青方向（非热点）';
   const kinds = new Set(card.sources.map(source => source.kind === 'search' || source.platform === '主动联网搜索' ? '联网搜索线索' : '热榜线索'));
@@ -75,6 +76,7 @@ export default function WorkbenchPanel({ persona, onOpenProject }: Props) {
             {[1, 3, 7].map(n => <option key={n} value={n}>最近{n}天</option>)}
           </select></label>
         </div>
+        {platformNotice(platform) && <p className="workbench-muted" role="note">{platformNotice(platform)}</p>}
         <WorkbenchEngines readOnly={true} onSearchReady={setSearchReady} />
         <p className="workbench-muted">① 基础推荐：热榜＋规则匹配，不调用AI。② 联网补充：主动搜索后重新匹配。③ AI分析：模型分析现有候选，不自动生成文章。讨论、依据与稿件统一在内容项目中处理。</p>
         <div className="workbench-actions">

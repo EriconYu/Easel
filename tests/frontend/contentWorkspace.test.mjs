@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {readFileSync, existsSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
+import {loadLibrary} from './publishHarness.mjs';
+const platformRegistry = loadLibrary('lib/platformCapabilities.ts');
 const require = createRequire(new URL('../../web/frontend/package.json', import.meta.url));
 const ts = require('typescript');
 const componentPath = new URL('../../web/frontend/src/components/ContentWorkspace.tsx', import.meta.url);
@@ -34,7 +36,7 @@ function harness(overrides = {}, initial = {}) {
   const outputs=()=>null, editor=()=>null, exports={};
   runInNewContext(ts.transpileModule(readFileSync(componentPath,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,
     {exports,Error,Date,Set,require:name=>name==='react'?react:name==='react/jsx-runtime'?jsx:name==='../lib/api'?api:
-      name==='./OutputsPage'?{__esModule:true,default:outputs}:name==='./WorkbenchDiscussion'?{DiscussionEditor:editor}:{}});
+      name==='../lib/platformCapabilities'?platformRegistry:name==='./OutputsPage'?{__esModule:true,default:outputs}:name==='./WorkbenchDiscussion'?{DiscussionEditor:editor}:{}});
   let nodes=[];
   const render=()=>{
     nodes=[]; const visited=new Set();

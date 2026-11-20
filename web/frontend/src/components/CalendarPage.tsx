@@ -14,7 +14,8 @@ const EVENT_TYPES = ['节日', '电商', '平台活动', '行业'];
 const SOURCE_LABEL: Record<string, string> = {
   chat: '对话页', 'publish-page': '发布页', manual: '手动', scheduler: '排期',
 };
-const PLATFORMS = ['小红书', '抖音', 'B站', '微信视频号', '快手', '公众号', '微博', '知乎', '今日头条'];
+import { SCHEDULE_PLATFORMS, platformNotice } from '../lib/platformCapabilities';
+const PLATFORMS = SCHEDULE_PLATFORMS;
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
 type Filter = 'all' | 'content' | 'event';
 
@@ -299,6 +300,7 @@ export default function CalendarPage({ onOpenProject }: Props) {
             ) : (
               <>
                 <label className="field-label">平台</label>
+                {platformNotice(form.platform || '') && <p className="pv-hint" role="note">{platformNotice(form.platform || '')}</p>}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
                   {PLATFORMS.map((p) => (
                     <button key={p} className={`chip ${form.platform === p ? 'active' : ''}`}

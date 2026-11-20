@@ -47,7 +47,7 @@ export default function PublishingPage({ persona, projectDraft }: { persona: str
           : '保留原有账号检查、预检、确认及自动提交流程。'}</span>
     </div>
     <div className="publishing-mode-content">
-      {manual ? <ManualPublishPage persona={persona} projectDraft={projectDraft} /> : <AutomatedPublishPage persona={persona} projectDraft={projectDraft} />}
+      {manual ? <ManualPublishPage key={persona} persona={persona} projectDraft={projectDraft} /> : <AutomatedPublishPage key={persona} persona={persona} projectDraft={projectDraft} />}
     </div>
   </div>;
 }

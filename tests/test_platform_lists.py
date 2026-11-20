@@ -61,33 +61,43 @@ def test_wizard_platform_options_include_toutiao():
 
 def test_calendar_platform_options_include_toutiao():
     """内容日历新建日程的「平台」胶囊。"""
-    platforms = _array_items(CALENDAR, "PLATFORMS")
-
-    assert TOUTIAO in platforms, f"内容日历缺今日头条，实际：{platforms}"
+    src = CALENDAR.read_text(encoding='utf-8')
+    registry = (FE.parent / 'lib' / 'platformCapabilities.ts').read_text(encoding='utf-8')
+    assert 'const PLATFORMS = SCHEDULE_PLATFORMS;' in src
+    assert "platform('toutiao', '今日头条'" in registry
 
 
 def test_publish_page_lists_toutiao():
     """发布页的平台表（key 用小写 id）与可发布集合。"""
     src = PUBLISH.read_text(encoding="utf-8")
 
-    assert "key: 'toutiao'" in src, "PublishPage 的 PLATFORMS 缺 toutiao 条目"
-    publishable = re.search(r"const PUBLISHABLE = new Set\(\[(.*?)\]\)", src, re.S)
-    assert publishable, "没找到 PUBLISHABLE 定义"
-    assert "'toutiao'" in publishable.group(1), "PUBLISHABLE 里应含 toutiao"
+    registry = (FE.parent / 'lib' / 'platformCapabilities.ts').read_text(encoding='utf-8')
+    assert 'const PLATFORMS = AUTOMATED_PLATFORMS;' in src
+    assert 'const PUBLISHABLE = new Set(PLATFORMS.map(p => p.key));' in src
+    assert "platform('toutiao', '今日头条'" in registry
 
 
 def test_publish_page_marks_toutiao_draft_capable():
     """「存草稿」开关靠 PLATFORMS 条目上的 draft 标记驱动——漏标开关就不出现。"""
     src = PUBLISH.read_text(encoding="utf-8")
 
-    m = re.search(r"\{ key: 'toutiao'[^\n]*", src)
-    assert m, "PublishPage 的 PLATFORMS 缺 toutiao 条目"
-    assert "draft: true" in m.group(0), f"toutiao 条目应标 draft: true，实际：{m.group(0)}"
+    registry = (FE.parent / 'lib' / 'platformCapabilities.ts').read_text(encoding='utf-8')
+    row = next(line for line in registry.splitlines() if "platform('toutiao'," in line)
+    assert 'draft: true' in row
+    assert 'draft: asDraft && !!p.draft' in src or 'createPublishSnapshot' in src
 
 
 LIB = PROJECT_ROOT / "web" / "frontend" / "src" / "lib"
 SKILL_NAMES = LIB / "skillDisplayNames.ts"
 CAPABILITY = LIB / "capabilityMenu.ts"
+
+
+def test_project_creation_platforms_match_shared_frontend_registry():
+    from easel.workbench import PLATFORMS
+    registry = (FE.parent / 'lib' / 'platformCapabilities.ts').read_text(encoding='utf-8')
+    labels = re.findall(r"platform\('[^']+', '([^']+)'", registry)
+    assert len(labels) == len(set(labels))
+    assert set(labels) == PLATFORMS
 
 
 def test_skill_display_name_includes_toutiao():

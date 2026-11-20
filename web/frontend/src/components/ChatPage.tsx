@@ -6,6 +6,7 @@ import type { ChatSession, ChatMessage, StreamState } from '../lib/store';
 import { uploadFiles, adoptOversize } from '../lib/api';
 import type { UploadedFile } from '../lib/api';
 import { IconArrowUp, IconStop, IconPlus, IconFile } from './icons';
+import { draftKey, readDraft, writeDraft } from '../lib/editorDrafts';
 
 interface ChatPageProps {
   projectTitle?: string;
@@ -41,8 +42,26 @@ function greeting(): string {
 
 export default function ChatPage({ apiDirect, session, stream, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed, projectTitle, onBackProject }: ChatPageProps) {
   const [projectError, setProjectError] = useState('');
-  const [input, setInput] = useState('');
-  const [attachments, setAttachments] = useState<UploadedFile[]>([]);
+  const key = draftKey('chat', session.persona || '', session.id);
+  const restored = readDraft<{input: string; attachments: UploadedFile[]}>(key);
+  const [input, setInputValue] = useState(typeof restored?.input === 'string' ? restored.input : '');
+  const [attachments, setAttachmentValues] = useState<UploadedFile[]>(Array.isArray(restored?.attachments) ? restored.attachments : []);
+  const setInput = (value: string) => {
+    writeDraft(key, {...readDraft<Record<string, unknown>>(key), input: value});
+    setInputValue(value);
+  };
+  const setAttachments = (value: UploadedFile[] | ((previous: UploadedFile[]) => UploadedFile[])) => {
+    setAttachmentValues(previous => {
+      const next = typeof value === 'function' ? value(previous) : value;
+      writeDraft(key, {...readDraft<Record<string, unknown>>(key), attachments: next});
+      return next;
+    });
+  };
+  useEffect(() => {
+    const value = readDraft<{input: string; attachments: UploadedFile[]}>(key);
+    setInputValue(typeof value?.input === 'string' ? value.input : '');
+    setAttachmentValues(Array.isArray(value?.attachments) ? value.attachments : []);
+  }, [key]);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [maxMb, setMaxMb] = useState(50);

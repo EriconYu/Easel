@@ -204,9 +204,10 @@ def test_primary_row_reports_main_role(env_key, slot, tmp_path, monkeypatch, oc_
                     "EASEL_LLM_BASE_URL=https://example.test/v1\n"
                     "CLAUDE_MODEL=anthropic/claude-opus-4-7\n", encoding="utf-8")
     monkeypatch.setattr(app, "ENV_FILE", envf)
+    endpoint = 'https://example.test/v1' if slot == 'relay' else 'https://api.anthropic.com'
     oc_cfg.write_text(json.dumps({
         "agents": {"defaults": {"model": {"primary": "anthropic/claude-opus-4-7"}}},
-        "models": {"providers": {}},
+        "models": {"providers": {"anthropic": {"baseUrl": endpoint, "apiKey": "dummy-value-for-unit-test"}}},
     }), encoding="utf-8")
 
     rows = {r["slot"]: r for r in app._model_channels()["channels"]["chat"]["rows"]}

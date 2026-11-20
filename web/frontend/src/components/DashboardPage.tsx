@@ -38,11 +38,12 @@ interface DashboardProps {
   agentRuntime: string;
   onNavigate: (page: Page) => void;
   onOpenProject: (taskId: string) => Promise<void>;
+  onOpenOutput: (path: string) => void;
 }
 
 const STATUS_LABEL: Record<string, string> = { idea: '选题', draft: '草稿', scheduled: '待发', published: '已发' };
 
-export default function DashboardPage({ persona, gatewayStatus, apiDirect, agentRuntime, onNavigate, onOpenProject }: DashboardProps) {
+export default function DashboardPage({ persona, gatewayStatus, apiDirect, agentRuntime, onNavigate, onOpenProject, onOpenOutput }: DashboardProps) {
   const [trends, setTrends] = useState<TrendGroup[]>([]);
   const [schedule, setSchedule] = useState<ScheduleItem[]>([]);
   const [outputs, setOutputs] = useState<OutputNode[]>([]);
@@ -143,7 +144,8 @@ export default function DashboardPage({ persona, gatewayStatus, apiDirect, agent
   const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
   const upcoming = [...schedule]
     .filter((s) => s.date >= todayStr && s.status !== 'published')
-    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time)).slice(0, 5);
+    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+  const upcomingPreview = upcoming.slice(0, 5);
   const recent = outputs.slice(0, 5);
   const pendingIdeas = ideas.filter((i) => i.status === 'pending');
   const loggedIn = accounts.filter((a) => a.loggedIn).length;
@@ -251,7 +253,7 @@ export default function DashboardPage({ persona, gatewayStatus, apiDirect, agent
             <button className="dash-more" onClick={() => onNavigate('calendar')}>日历 →</button>
           </div>}>
           {upcoming.length === 0 && <div className="dash-empty">暂无排期，去日历安排一条吧</div>}
-          {upcoming.map((s) => (
+          {upcomingPreview.map((s) => (
             <div key={s.id} className="dash-sched" onClick={() => onNavigate('calendar')}>
               <span className="dash-sched-date">{s.date.slice(5)}</span>
               <span className="dash-sched-title">{s.platform ? `[${s.platform}] ` : ''}{s.title}</span>
@@ -267,7 +269,8 @@ export default function DashboardPage({ persona, gatewayStatus, apiDirect, agent
           </div>}>
           {recent.length === 0 && <div className="dash-empty">暂无产物，在内容项目中继续创作。</div>}
           {recent.map((g) => (
-            <div key={g.name} className="dash-output" onClick={() => onNavigate('outputs')}>
+            <div key={g.name} className="dash-output" role="button" tabIndex={0} onClick={() => onOpenOutput(g.path)}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenOutput(g.path); } }}>
               <span className="dash-output-name">{g.meta?.title || g.name}</span>
               <span className="badge">{g.meta?.platform || (g.type === 'dir' ? `${g.fileCount ?? 0} 文件` : '单文件')}</span>
             </div>

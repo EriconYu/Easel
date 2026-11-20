@@ -30,6 +30,10 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+try:
+    from . import calendar_store
+except ImportError:  # direct script / publisher import from shared/scripts
+    import calendar_store
 
 def _find_root() -> Path:
     """定位项目根：优先 EASEL_ROOT env，否则向上找含 outputs/setup.sh 的目录。
@@ -65,26 +69,11 @@ PLATFORM_NAMES = {
 # I/O
 # --------------------------------------------------------------------------- #
 def load(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return []
-    return data if isinstance(data, list) else []
+    return calendar_store.load(path)
 
 
 def atomic_write(path: Path, items: list[dict]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(items, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    calendar_store.atomic_write(path, items)
 
 
 def _today() -> datetime:
@@ -117,7 +106,7 @@ def _parse_date(s: str):
 # publish-log 转发（保持归因指标底座同步，best-effort）
 # --------------------------------------------------------------------------- #
 def _forward_publish_log(platform: str, title: str, url: str, ptype: str,
-                         tags: str, source: str, profile: str = "") -> None:
+                         tags: str, source: str, profile: str = "", data_path: Path | None = None) -> None:
     # 兼容两种布局：项目根 skills/builtin/... 与 OpenClaw workspace 拍平后的 skills/...
     candidates = [
         PROJECT_ROOT / "skills" / "builtin" / "skill-publish-log" / "scripts" / "log.py",
@@ -126,7 +115,8 @@ def _forward_publish_log(platform: str, title: str, url: str, ptype: str,
     log_py = next((c for c in candidates if c.is_file()), None)
     if log_py is None:
         return  # 找不到 → 跳过（仅日历库落记录，best-effort）
-    cmd = [sys.executable, str(log_py), "record", "--platform", platform,
+    log_data = (data_path or DEFAULT_DATA).resolve().parent / '_analytics' / 'publish-log.json'
+    cmd = [sys.executable, str(log_py), '--data', str(log_data), "record", "--platform", platform,
            "--title", title, "--skill-source", source or "calendar-auto"]
     if url:
         cmd += ["--url", url]
@@ -149,43 +139,105 @@ def _forward_publish_log(platform: str, title: str, url: str, ptype: str,
 def record_publish(platform: str, title: str, url: str = "", ptype: str = "",
                    tags: str = "", note: str = "", source: str = "chat",
                    profile: str = "", data_path: Path | None = None,
-                   forward_log: bool = True, status: str = "published") -> bool:
-    """追加一条已发布记录到日历底座。返回是否写入。全程异常安全。
-    status='draft' 用于「存草稿」——内容进了平台草稿箱，不算已发布。
-    env EASEL_CALENDAR_AUTORECORD=0 时直接跳过（发布页由 web 记录，防重复）。"""
-    if os.environ.get("EASEL_CALENDAR_AUTORECORD") == "0":
+                   forward_log: bool = True, status: str = "published",
+                   project_link: dict | None = None, receipt_id: str = "",
+                   autorecord: bool = True) -> bool:
+    """One receipt path for standalone publishers and web project handoffs.
+
+    Explicit receipts are idempotent; draft receipts never enter attribution.
+    Calendar failure is best-effort for publishers, and never replaces bad data.
+    Ambiguous project links return False without changing the calendar, but still
+    forward real publications. A locked sidecar remembers those unlinked receipts
+    so a callback retry (including after disambiguation) cannot double attribution.
+    """
+    if autorecord and os.environ.get("EASEL_CALENDAR_AUTORECORD") == "0":
         return False
     try:
-        path = data_path or DEFAULT_DATA
+        path = (data_path or DEFAULT_DATA).resolve()
         profile = (profile or os.environ.get("EASEL_ACTIVE_PROFILE") or "").strip()
         now = _today()
-        item = {
-            "id": _new_id(),
-            "title": (title or "").strip() or "未命名",
-            "date": now.strftime("%Y-%m-%d"),
-            "platform": _norm_platform(platform),
-            "time": now.strftime("%H:%M"),
-            "status": status if status in CONTENT_STATUSES else "published",
-            "note": (note or "")[:200],
-            "kind": "content",
-            "url": url or "",
-            "source": source if source in SOURCES else "chat",
-            "profile": profile,
-        }
-        items = load(path)
-        items.append(item)
-        atomic_write(path, items)
+        status = status if status in CONTENT_STATUSES else 'published'
+        platform_name = _norm_platform(platform)
+        # Keep this script usable in the flattened OpenClaw shared/scripts layout.
+        platform_name = {'微信公众号':'公众号', '微信视频号':'视频号', '推特 X':'X'}.get(platform_name, platform_name)
+        with calendar_store.lock(path):
+            items = load(path)
+            if receipt_id and any(it.get('publication_receipt_id') == receipt_id or receipt_id in it.get('publication_receipts', []) for it in items):
+                return True
+            matches = []
+            if project_link:
+                matches = [it for it in items if all(it.get(k) == v for k, v in project_link.items())
+                           and {'微信公众号':'公众号', '微信视频号':'视频号', '推特 X':'X'}.get(it.get('platform'), it.get('platform')) == platform_name
+                           and it.get('status') != 'published']
+            # This ledger is separate from calendar rows: an ambiguous receipt
+            # belongs to no particular plan. The calendar lock also serializes it.
+            receipt_path = path.with_name(f'.{path.name}.unlinked-receipts.json')
+            unlinked = load(receipt_path) if receipt_id and forward_log and status == 'published' else []
+            already_forwarded = any(it.get('receipt_id') == receipt_id for it in unlinked)
+            if len(matches) > 1:
+                # A real publish still counts, even when no plan can be safely chosen.
+                # Do not append or rewrite the calendar on ambiguous linkage.
+                if forward_log and status == 'published' and not already_forwarded:
+                    _forward_publish_log(platform_name, (title or '').strip() or '未命名', url,
+                                         ptype, tags, 'calendar-auto', profile, data_path=path)
+                    if receipt_id:
+                        unlinked.append({'receipt_id': receipt_id})
+                        atomic_write(receipt_path, unlinked)
+                return False
+            item = matches[0] if len(matches) == 1 else {
+                'id': _new_id(), 'title': (title or '').strip() or '未命名',
+                'date': now.strftime('%Y-%m-%d'), 'time': now.strftime('%H:%M'),
+                'platform': platform_name, 'kind': 'content',
+                'source': source if source in SOURCES else 'chat',
+                **(project_link or {}),
+            }
+            if len(matches) != 1:
+                items.append(item)
+            item.update({
+                'status': 'scheduled' if status == 'draft' and item.get('status') == 'scheduled' else status,
+                'note': item.get('note', (note or '')[:200]), 'url': url or item.get('url', ''), 'profile': profile,
+                'publication_status': status, 'publication_note': (note or '')[:200],
+                'publication_recorded_at': now.strftime('%Y-%m-%dT%H:%M:%S%z'),
+                'publication_receipt_id': receipt_id,
+                'publication_receipts': list(dict.fromkeys([*item.get('publication_receipts', []), *([receipt_id] if receipt_id else [])])),
+            })
+            # Serialize forwarding with receipt dedupe across web/CLI processes.
+            if forward_log and status == 'published' and not already_forwarded:
+                _forward_publish_log(platform_name, item['title'], item['url'], ptype,
+                                     tags, 'calendar-auto', profile, data_path=path)
+            atomic_write(path, items)
     except Exception:
-        return False  # 记录失败绝不影响发布
-    if forward_log and item['status'] == 'published':
-        _forward_publish_log(_norm_platform(platform), item["title"], url, ptype,
-                             tags, "calendar-auto", profile)
+        return False
     return True
 
 
 # --------------------------------------------------------------------------- #
 # 子命令
 # --------------------------------------------------------------------------- #
+def mark_manual_publication(item: dict, previous: dict | None = None) -> bool:
+    """Record a user's first confirmation, never reinterpret its plan date.
+
+    Editing an already published legacy row does not invent a historical actual
+    timestamp. Legacy records keep the documented date fallback.
+    """
+    previous = previous or {}
+    if ((item.get('kind') or 'content') != 'content' or item.get('status') != 'published'
+            or previous.get('status') == 'published' or previous.get('publication_status') == 'published'):
+        return False
+    receipt = uuid.uuid4().hex
+    item.update(publication_status='published',
+                publication_recorded_at=_today().strftime('%Y-%m-%dT%H:%M:%S%z'),
+                publication_receipt_id=receipt,
+                publication_receipts=[*item.get('publication_receipts', []), receipt])
+    return True
+
+
+def forward_manual_publication(item: dict, data_path: Path) -> None:
+    """Called after calendar persistence; attribution stays best-effort."""
+    _forward_publish_log(item.get('platform', ''), item.get('title', ''), item.get('url', ''),
+                         '', '', 'manual-calendar', item.get('persona') or item.get('profile', ''), data_path=data_path)
+
+
 def cmd_record_publish(args) -> None:
     ok = record_publish(args.platform, args.title, url=args.url or "",
                         ptype=args.type or "", tags=args.tags or "",
@@ -199,7 +251,6 @@ def cmd_record_publish(args) -> None:
 
 def cmd_add_event(args) -> None:
     path = Path(args.data)
-    items = load(path)
     item = {
         "id": _new_id(),
         "title": (args.title or "").strip() or "未命名活动",
@@ -212,8 +263,8 @@ def cmd_add_event(args) -> None:
         "event_type": args.event_type or "",
         "end_date": args.end_date or "",
     }
-    items.append(item)
-    atomic_write(path, items)
+    with calendar_store.transaction(path) as items:
+        items.append(item)
     print(json.dumps({"ok": True, "id": item["id"], "item": item},
                      ensure_ascii=False, indent=2))
 
@@ -250,9 +301,8 @@ def cmd_import_events(args) -> None:
         sys.exit(f"错误：无法解析 JSON：{e}")
     events = payload if isinstance(payload, list) else payload.get("events", [])
     path = Path(args.data)
-    items = load(path)
-    added = _merge_events(items, events)
-    atomic_write(path, items)
+    with calendar_store.transaction(path) as items:
+        added = _merge_events(items, events)
     print(json.dumps({"ok": True, "added": added, "total": len(items)},
                      ensure_ascii=False))
 
@@ -355,9 +405,8 @@ def cmd_seed_holidays(args) -> None:
         missed = [n for _, n, _, _ in _LUNAR_FESTIVALS]  # 找不到 lunar.py → 阴历节日跳过
 
     path = Path(args.data)
-    items = load(path)
-    added = _merge_events(items, events)
-    atomic_write(path, items)
+    with calendar_store.transaction(path) as items:
+        added = _merge_events(items, events)
     out = {"ok": True, "year": year, "added": added, "total": len(items),
            "lunar_source": str(lunar_py) if lunar_py else None}
     if missed:
@@ -414,7 +463,7 @@ def cmd_context(args) -> None:
     # 各平台节奏 + 断更缺口
     per_platform: dict[str, dict] = {}
     for it in published:
-        d = _parse_date(it.get("date", ""))
+        d = _parse_date(it.get("publication_recorded_at") or it.get("date", ""))
         if d is None:
             continue
         pf = it.get("platform") or "未标平台"

@@ -60,14 +60,14 @@ def canonical_platform(name):
     return {'微信公众号':'公众号','微信视频号':'视频号','推特 X':'X'}.get(name, name or '')
 
 
-def duplicate(items: list, data: dict) -> dict | None:
+def duplicate(items: list, data: dict, exclude_id: str | None = None) -> dict | None:
     """调用方先验证关联，在原日历锁内查重；自由日历始终保留旧行为。"""
     if not data.get('persona') or not data.get('task_id') or data.get('kind') == 'event':
         return None
     fields = ('persona', 'task_id', 'version_id', 'platform', 'date', 'time', 'kind')
     target = tuple(canonical_platform(data.get(field)) if field == 'platform' else (data.get(field) or ('content' if field == 'kind' else '')) for field in fields)
     for item in items:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or (exclude_id is not None and item.get('id') == exclude_id):
             continue
         identity = tuple(canonical_platform(item.get(field)) if field == 'platform' else (item.get(field) or ('content' if field == 'kind' else '')) for field in fields)
         if identity == target:

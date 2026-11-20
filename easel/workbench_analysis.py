@@ -50,6 +50,11 @@ def apply_analysis(persona, expected_ids, answer, *, engine=None):
             card['analyzed_at'] = workbench.now()
             card['analysis_engine'] = deepcopy(engine)
             updated.append(card)
+            # Explicit analysis updates the same persisted project atomically;
+            # future candidate refreshes must not revert its adopted topic.
+            task = next((t for t in data['tasks'] if t['task_id'] == card['task_id']), None)
+            if task is not None:
+                task.update(title=card['title'], card=deepcopy(card), updated_at=workbench.now())
         data['recommendations'].update(cards=updated, ranking='AI分析（来源仍需核验）', analyzed_at=workbench.now())
         workbench._write(persona, data)
         return data['recommendations']

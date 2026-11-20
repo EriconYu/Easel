@@ -57,8 +57,7 @@ export default function App() {
     const list = await fetchPersonas();
     if (personaRequestId.current !== id) return null;
     setPersonas(list);
-    // 个人工作台只有一个画像时直接使用，无需用户先去对话页选择。
-    setSelectedPersona((current) => current || (list.length === 1 ? list[0].name : ''));
+    // 空字符串是显式通用模式，刷新画像列表不得把它改成唯一画像。
     setPersonasLoaded(true);
     return list;
   }, []);
@@ -82,7 +81,11 @@ export default function App() {
   useEffect(() => {
     const onSaveError = () => setSessionSaveError(true);
     window.addEventListener('easel-session-save-error', onSaveError);
-    return () => window.removeEventListener('easel-session-save-error', onSaveError);
+    window.addEventListener('easel-editor-save-error', onSaveError);
+    return () => {
+      window.removeEventListener('easel-session-save-error', onSaveError);
+      window.removeEventListener('easel-editor-save-error', onSaveError);
+    };
   }, []);
 
   // 对话里的「产物路径 → 内容库」跳转：linkifyOutputs 把目录路径生成为
@@ -553,7 +556,8 @@ export default function App() {
     const agentMessage = (legacyAgentText || displayText).trim();
     if ((!agentMessage && attachments.length === 0) || streamCtl.current[sessionId] || streamAcc.current[sessionId]) return;
     const cur = sessionsRef.current.find((s) => s.id === sessionId);
-    const persona = availablePersona(cur?.persona || selectedPersona, personasLoaded ? personas : null) || undefined;
+    if (!cur) return; // 不存在的会话不是通用会话，不可借用全局画像发送。
+    const persona = availablePersona(cur.persona ?? '', personasLoaded ? personas : null) || undefined;
     setSessions((prev) => {
       const next = prev.map((s) => {
         if (s.id !== sessionId) return s;
@@ -672,6 +676,12 @@ export default function App() {
     });
   }, []);
 
+  // 所有自动/手动会话切换都同步身份；通用会话明确清空画像。
+  const activateSession = useCallback((session: ChatSession) => {
+    setActiveSessionId(session.id);
+    setSelectedPersona(session.persona ?? '');
+  }, []);
+
   const handleSessionArchive = useCallback((id: string, archived: boolean) => {
     setSessions((prev) => {
       const next = prev.map((s) => (s.id === id ? { ...s, archived } : s));
@@ -682,15 +692,15 @@ export default function App() {
     if (archived && id === activeSessionId) {
       const rest = sessionsRef.current.filter((s) => s.id !== id && !s.archived);
       if (rest.length) {
-        setActiveSessionId(rest[0].id);
+        activateSession(rest[0]);
       } else {
         const ns = createSession(selectedPersona || undefined);
         setSessions((prev) => { const u = [ns, ...prev]; saveSessions(u); return u; });
-        setActiveSessionId(ns.id);
+        activateSession(ns);
       }
       setCurrentPage('chat');
     }
-  }, [activeSessionId, selectedPersona]);
+  }, [activeSessionId, selectedPersona, activateSession]);
 
   const handleNewChat = useCallback(() => {
     const newSession = createSession(selectedPersona || undefined);
@@ -704,13 +714,11 @@ export default function App() {
   }, [selectedPersona]);
 
   const handleSessionSelect = useCallback((id: string) => {
-    setActiveSessionId(id);
-    const target = sessions.find(s => s.id === id);
-    if (target) {
-      setSelectedPersona(target.persona || '');
-    }
+    const target = sessionsRef.current.find(s => s.id === id);
+    if (!target) return;
+    activateSession(target);
     setCurrentPage('chat');
-  }, [sessions]);
+  }, [activateSession]);
 
   const handleSessionDelete = useCallback((id: string) => {
     if (!window.confirm('确定删除这条对话？')) return;
@@ -735,18 +743,19 @@ export default function App() {
       saveSessions(updated);
 
       if (id === activeSessionId) {
-        if (updated.length > 0) {
-          setActiveSessionId(updated[0].id);
+        const nextActive = updated.find(session => !session.archived);
+        if (nextActive) {
+          activateSession(nextActive);
         } else {
           const newSession = createSession();
           updated.unshift(newSession);
           saveSessions(updated);
-          setActiveSessionId(newSession.id);
+          activateSession(newSession);
         }
       }
       return updated;
     });
-  }, [activeSessionId, clearStream]);
+  }, [activeSessionId, clearStream, activateSession]);
 
   // 首次引导：跳过（用通用模式）
   const dismissRecommend = useCallback(() => {
@@ -798,6 +807,7 @@ export default function App() {
             agentRuntime={agentRuntime}
             onNavigate={setCurrentPage}
             onOpenProject={handleOpenProject}
+            onOpenOutput={path => { setOutputsJump(path); setCurrentPage('outputs'); }}
           />
         );
       case 'chat':
@@ -806,7 +816,7 @@ export default function App() {
             projectTitle={chatProject?.title}
             onBackProject={chatProject && activeSession.persona ? () => handleOpenLinkedProject(activeSession.persona!, chatProject.task_id) : undefined}
             apiDirect={apiDirect}
-            key={activeSession.id}
+            key={`${activeSession.persona || ''}:${activeSession.id}`}
             session={activeSession}
             stream={streams[activeSession.id]}
             onSend={(displayText, attachments) => handleSendMessage(activeSession.id, displayText, attachments)}
@@ -902,7 +912,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <main className="main-content">
-        {sessionSaveError && <div className="notice-error" role="alert">会话未能写入浏览器存储，内容仍保留在当前页面。请检查存储空间或权限。<button className="btn btn-sm" onClick={() => setSessionSaveError(false)}>关闭提示</button></div>}
+        {sessionSaveError && <div className="notice-error" role="alert">会话或工作草稿未能写入浏览器存储，内容仅在当前标签内保留，关闭或刷新可能丢失。请检查存储空间或权限。<button className="btn btn-sm" onClick={() => setSessionSaveError(false)}>关闭提示</button></div>}
         {(['trends', 'ideas', 'calendar', 'publish', 'breakdown'] as Page[]).includes(currentPage) && (
           <SubNav current={currentPage} onNavigate={setCurrentPage} />
         )}

@@ -57,17 +57,89 @@ function readMigratedLocalValue(key: string, suffix: string): string | null {
 const PUBLISH_DEFAULT: PublishDraft = {
   title: '', body: '', platforms: ['xiaohongshu', 'douyin'], overrides: {}, tags: '',
 };
-export function loadPublishDraft(): PublishDraft {
+const publishKey = (persona: string) => `${PUBLISH_KEY}:persona:${JSON.stringify(persona)}`;
+const emptyPublishDraft = (): PublishDraft => ({ ...PUBLISH_DEFAULT, platforms: [...PUBLISH_DEFAULT.platforms], overrides: {} });
+export function loadPublishDraft(persona = ''): PublishDraft {
   try {
-    const raw = readMigratedLocalValue(PUBLISH_KEY, 'publish_draft');
-    if (!raw) return { ...PUBLISH_DEFAULT };
-    return { ...PUBLISH_DEFAULT, ...(JSON.parse(raw) as PublishDraft) };
+    let raw = localStorage.getItem(publishKey(persona));
+    if (!raw) {
+      // Never claim an unowned legacy draft for whichever persona opens first.
+      // Keep the old value intact for explicit recovery; only proven owners migrate.
+      for (const key of [PUBLISH_KEY, `${PREVIOUS_BRAND}_publish_draft`]) {
+        const legacy = localStorage.getItem(key);
+        if (legacy && persona && JSON.parse(legacy)?.project_source?.persona === persona) {
+          raw = legacy;
+          localStorage.setItem(publishKey(persona), legacy);
+          break;
+        }
+      }
+    }
+    if (!raw) return emptyPublishDraft();
+    const value = JSON.parse(raw) as PublishDraft;
+    if (!value || typeof value.title !== 'string' || typeof value.body !== 'string'
+      || !Array.isArray(value.platforms) || value.platforms.some(p => typeof p !== 'string')
+      || !value.overrides || typeof value.overrides !== 'object' || Array.isArray(value.overrides)
+      || Object.values(value.overrides).some(text => typeof text !== 'string')
+      || (value.project_source && value.project_source.persona !== persona)) return emptyPublishDraft();
+    return { title: value.title, body: value.body, platforms: value.platforms, overrides: value.overrides,
+      tags: typeof value.tags === 'string' ? value.tags : '', project_source: value.project_source };
   } catch {
-    return { ...PUBLISH_DEFAULT };
+    return emptyPublishDraft();
   }
 }
-export function savePublishDraft(d: PublishDraft): void {
-  try { localStorage.setItem(PUBLISH_KEY, JSON.stringify(d)); } catch { /* quota */ }
+export function savePublishDraft(d: PublishDraft, persona = ''): void {
+  if (d.project_source && d.project_source.persona !== persona) return;
+  try { localStorage.setItem(publishKey(persona), JSON.stringify(d)); } catch { /* quota */ }
+}
+
+/** Legacy content is never silently claimed. UI must ask before calling restore. */
+export function recoverableLegacyPublishDraft(persona: string): PublishDraft | undefined {
+  try {
+    for (const key of [PUBLISH_KEY, `${PREVIOUS_BRAND}_publish_draft`]) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const value = { ...emptyPublishDraft(), ...JSON.parse(raw) } as PublishDraft;
+      if (value.project_source?.persona && value.project_source.persona !== persona) continue;
+      if (typeof value.title !== 'string' || typeof value.body !== 'string' || typeof value.tags !== 'string'
+        || !Array.isArray(value.platforms) || value.platforms.some(p => typeof p !== 'string')
+        || !value.overrides || typeof value.overrides !== 'object' || Array.isArray(value.overrides)
+        || Object.values(value.overrides).some(text => typeof text !== 'string')) continue;
+      return value;
+    }
+  } catch { /* corrupt legacy data remains untouched */ }
+}
+export function restoreLegacyPublishDraft(persona: string): PublishDraft | undefined {
+  if (!persona) return;
+  const value = recoverableLegacyPublishDraft(persona);
+  if (!value) return;
+  try {
+    const serialized = JSON.stringify(value);
+    localStorage.setItem(publishKey(persona), serialized);
+    if (localStorage.getItem(publishKey(persona)) !== serialized) return;
+    // Archive the explicitly claimed draft with its owner; do not leave an
+    // unowned duplicate that another persona could accidentally claim later.
+    localStorage.setItem(`${PUBLISH_KEY}:legacy-recovered`, JSON.stringify({ persona, draft: value }));
+    for (const key of [PUBLISH_KEY, `${PREVIOUS_BRAND}_publish_draft`]) {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const candidate = { ...emptyPublishDraft(), ...JSON.parse(raw) };
+        if (JSON.stringify(candidate) === serialized) localStorage.removeItem(key);
+      }
+    }
+    return value;
+  } catch { return; }
+}
+
+/** A review/submit pair must share these exact, deeply frozen payloads. */
+export function createPublishSnapshot(d: PublishDraft, persona: string, media: string[], asDraft: boolean,
+  targets: {key: string; draft?: boolean}[]) {
+  return Object.freeze(targets.map(target => {
+    const files = [...media];
+    Object.freeze(files);
+    const payload = Object.freeze({ ...d.project_source, persona, title: d.title,
+      body: d.overrides[target.key] ?? d.body, tags: d.tags, media: files, draft: asDraft && !!target.draft });
+    return Object.freeze({ platform: target.key, payload });
+  }));
 }
 
 const STORAGE_KEY = 'easel_sessions';

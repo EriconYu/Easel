@@ -8,6 +8,7 @@ import type { WorkbenchBrief, WorkbenchSkill, WorkbenchDocument, WorkbenchVersio
 import type { Page } from './Sidebar';
 import type { TaskInspiration } from '../lib/api';
 import InspirationPicker from './InspirationPicker';
+import { draftKey, loadEditorDraft, writeDraft, confirmDraftReplacement, editorDirty, briefFields, inspirationFields, type EditorDraft } from '../lib/editorDrafts';
 
 export interface WorkbenchDiscussionProps {
   persona: string;
@@ -25,9 +26,14 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
   const [versions, setVersions] = useState<WorkbenchVersion[]>([]);
   const [skillFilter, setSkillFilter] = useState('');
   const [documentFilter, setDocumentFilter] = useState('');
-  const [text, setText] = useState('');
-  const [name, setName] = useState('');
-  const [selectedVersion, setSelectedVersion] = useState('');
+  const key = draftKey('project', persona, taskId);
+  const [draft, setDraft] = useState(loadEditorDraft(key));
+  const {text, name, selectedVersion, sourceVersionId, sourceTurnId} = draft;
+  const updateDraft = (patch: Partial<EditorDraft> | ((value: EditorDraft) => Partial<EditorDraft>)) => setDraft(value => {
+    const next = {...value, ...(typeof patch === 'function' ? patch(value) : patch)};
+    writeDraft(key, next);
+    return next;
+  });
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -35,13 +41,23 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
 
   useEffect(() => {
     let active = true;
+    setBusy(true); setError(''); setNotice(''); setBrief(null);
+    const working = loadEditorDraft(key);
+    setDraft(working);
     setInspiration(null);
     Promise.all([fetchWorkbenchBrief(persona, taskId), fetchWorkbenchSkills(),
       fetchWorkbenchDocuments(), fetchWorkbenchVersions(persona, taskId), fetchTaskInspiration(persona, taskId)])
       .then(([value, skillList, documentList, versionList, adopted]) => {
         if (!active) return;
-        setInspiration(adopted);
-        setBrief(value);
+        const loadedInspiration = working.inspiration ? {...adopted, ...working.inspiration} : adopted;
+        const loadedBrief = {...value, ...working.brief};
+        setInspiration(loadedInspiration);
+        setBrief(loadedBrief);
+        const initialized = {...working, brief: briefFields(loadedBrief), inspiration: inspirationFields(loadedInspiration),
+          // Only fresh server data supplies a missing baseline; legacy local edits stay protected.
+          savedBrief: working.savedBrief ?? (working.brief ? undefined : briefFields(value)),
+          savedInspiration: working.savedInspiration ?? (working.inspiration ? undefined : inspirationFields(adopted))};
+        setDraft(initialized); writeDraft(key, initialized);
         setSkills(skillList.items);
         setDocuments(documentList.items);
         setVersions(versionList.items);
@@ -59,25 +75,40 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
     catch (e) { setError(e instanceof Error ? e.message : '操作失败'); }
     finally { setBusy(false); }
   };
-  const update = (patch: Partial<WorkbenchBrief>) => setBrief(value => value ? {...value, ...patch} : value);
+  const update = (patch: Partial<WorkbenchBrief>) => {
+    if (!brief) return;
+    const next = {...brief, ...patch};
+    setBrief(next);
+    updateDraft({brief: briefFields(next)});
+  };
   const toggle = (field: 'skill_ids' | 'document_ids', id: string) => {
     if (!brief) return;
     update({[field]: brief[field].includes(id) ? brief[field].filter(value => value !== id) : [...brief[field], id]});
   };
   const save = async () => {
     if (!brief) throw new Error('请等待依据加载完成');
+    const submittedBrief = briefFields(brief);
     const saved = await saveWorkbenchBrief(persona, taskId, brief);
-    setBrief(saved);
+    const savedBrief = briefFields(saved);
+    setBrief(current => current && JSON.stringify(briefFields(current)) === JSON.stringify(submittedBrief) ? saved : current);
+    updateDraft(current => ({savedBrief,
+      ...(JSON.stringify(current.brief) === JSON.stringify(submittedBrief) ? {brief: savedBrief} : {})}));
     if (!inspiration) throw new Error('请等待个人灵感引用加载完成');
+    const submittedInspiration = inspirationFields(inspiration);
     const adopted = await saveTaskInspiration(persona, taskId, inspiration.enabled, inspiration.references);
-    setInspiration(adopted);
+    const savedInspiration = inspirationFields(adopted);
+    setInspiration(current => current && JSON.stringify(inspirationFields(current)) === JSON.stringify(submittedInspiration) ? adopted : current);
+    updateDraft(current => ({savedInspiration,
+      ...(JSON.stringify(current.inspiration) === JSON.stringify(submittedInspiration) ? {inspiration: savedInspiration} : {})}));
     setNotice('创作依据已保存，所选真实片段和个人灵感会自动加入模型上下文。');
   };
   const act = (format: WorkbenchFormat) => run(async () => {
     await save();
     await onAction(format);
   });
-  const retrieve = () => run(async () => {
+  const retrieve = () => {
+    if (!confirmDraftReplacement(draft)) return;
+    return run(async () => {
     const {tasks} = await fetchWorkbench(persona);
     const sessionId = tasks.find(task => task.task_id === taskId)?.session_id;
     if (!sessionId) throw new Error('此任务还没有对话稿，请先讨论或生成。');
@@ -86,10 +117,10 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
     if (last.status !== 'done' || last.clean_end === false || last.stop_reason === 'error') throw new Error('本轮生成失败，不能作为稿件取回；请修正模型配置或重试。');
     if (!last.text?.trim()) throw new Error('最近对话没有可取回的稿件。');
     const body = last.text.match(/【正文开始】\s*([\s\S]*?)\s*【正文结束】/);
-    setText(body ? body[1] : last.text);
-    setSelectedVersion('');
+    updateDraft({text: body ? body[1] : last.text, selectedVersion: '', sourceVersionId: '', sourceTurnId: last.turn_id || '', sourceKind: 'turn', savedText: '', savedName: ''});
     setNotice(body ? '已提取正文；内部依据仍保留在对话及引用快照中，请审核后另存版本。' : '未识别正文边界，已取回完整对话文本；请删除内部说明和路径后再用于发布。');
-  });
+    });
+  };
 
   return <div className="workbench-discussion">
     {error && <p role="alert" className="workbench-error">{error}</p>}
@@ -98,7 +129,10 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
     {brief && <fieldset disabled={busy} className="workbench-content">
       {inspiration && <details className="workbench-inspiration"><summary>个人灵感与好稿复用（可选）</summary>
         <InspirationPicker persona={persona} exclude={inspiration.exclude} enabled={inspiration.enabled}
-          selected={inspiration.references} onChange={(enabled, references) => setInspiration({...inspiration, enabled, references})} />
+          selected={inspiration.references} onChange={(enabled, references) => {
+            setInspiration({...inspiration, enabled, references});
+            updateDraft({inspiration: {enabled, references}});
+          }} />
         <p>只有保存后才采用所选内容；它们作为个人原话或经验，不等于外部事实证据。</p>
       </details>}
       <label>我的观点<textarea aria-label="我的观点" value={brief.viewpoint} onChange={e => update({viewpoint: e.target.value})} /></label>
@@ -136,19 +170,32 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
       </details>
       <label>历史版本<select aria-label="历史版本" value={selectedVersion} onChange={e => {
         const version = versions.find(item => item.id === e.target.value);
-        setSelectedVersion(e.target.value);
-        if (version) { setText(version.text); setName(version.name); }
+        if (!version || !confirmDraftReplacement(draft)) return;
+        const selectedBrief = version.brief ?? version.declared_brief ?? brief;
+        setBrief(selectedBrief);
+        updateDraft({selectedVersion: version.id, text: version.text, name: version.name,
+          sourceVersionId: version.id, sourceTurnId: '', sourceKind: version.provenance?.kind || 'version',
+          brief: briefFields(selectedBrief), savedText: version.text, savedName: version.name});
       }}>
         <option value="">选择历史版本</option>
         {versions.map(version => <option key={version.id} value={version.id}>{version.name} · {version.created_at}</option>)}
       </select></label>
-      <label>稿件文本<textarea aria-label="稿件文本" className="workbench-manuscript" value={text} onChange={e => setText(e.target.value)} placeholder="稿件保持空白，可取回对话稿或自行编辑" /></label>
-      <label>版本名<input aria-label="版本名" value={name} onChange={e => setName(e.target.value)} /></label>
+      <label>稿件文本<textarea aria-label="稿件文本" className="workbench-manuscript" value={text} onChange={e => updateDraft({text: e.target.value})} placeholder="稿件保持空白，可取回对话稿或自行编辑" /></label>
+      <label>版本名<input aria-label="版本名" value={name} onChange={e => updateDraft({name: e.target.value})} /></label>
+      <p role="status">{editorDirty(draft) ? '工作草稿已保留，正文、版本名或创作依据尚未保存。' : '工作草稿已保留。'}{sourceVersionId ? '基于历史版本；手改内容需核验。' : sourceTurnId ? '基于对话快照；手改内容需核验。' : ''}</p>
+      {draft.sourceKind === 'unverified_turn' && <p role="note">历史对话无生成依据快照，当前依据仅供核对，不作为生成证明。</p>}
+      {draft.sourceKind === 'manual_declared' && <p role="note">依据由用户手动声明，不代表 AI 已核验或曾按这些依据生成。</p>}
+      {(draft.sourceKind === 'version' || draft.sourceKind === 'turn') && <p role="note">来源记录保留历史依据；当前手动编辑与声明不等于模型事实核验。</p>}
       <div className="workbench-actions">
         <button onClick={retrieve}>取回最新对话稿</button>
         <button disabled={!name.trim() || !text.trim()} onClick={() => run(async () => {
           await save();
-          await saveWorkbenchVersion(persona, taskId, name.trim(), text);
+          const saved = await saveWorkbenchVersion(persona, taskId, name.trim(), text, {
+            source_version_id: sourceVersionId || undefined, source_turn_id: sourceTurnId || undefined,
+          });
+          updateDraft({name: name.trim(), savedText: text, savedName: name.trim(),
+            selectedVersion: saved?.id || '', sourceVersionId: saved?.id || sourceVersionId, sourceTurnId: '',
+            sourceKind: saved?.provenance?.kind || draft.sourceKind});
           setVersions((await fetchWorkbenchVersions(persona, taskId)).items);
           setNotice('已新增独立版本，原稿与历史版本均保留。');
         })}>保存新版本</button>

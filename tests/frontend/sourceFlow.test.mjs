@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
+import {loadLibrary} from './publishHarness.mjs';
+const platformRegistry = loadLibrary('lib/platformCapabilities.ts');
 
 const require = createRequire(new URL('../../web/frontend/package.json', import.meta.url));
 const ts = require('typescript');
@@ -24,7 +26,7 @@ function harness(file, api, props, modules = {}, exportName = 'default') {
   const source = read(file) + (exportName === 'RadarPanel' ? '\nexport {RadarPanel};' : '');
   runInNewContext(ts.transpileModule(source, {compilerOptions: {module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, target: ts.ScriptTarget.ES2022}}).outputText, {
     exports, Error, Date, Set, localStorage: {getItem: () => null},
-    require: name => name === 'react' ? react : name === 'react/jsx-runtime' ? jsx : name === '../lib/api' ? api : modules[name] || {default: 'panel'},
+    require: name => name === 'react' ? react : name === 'react/jsx-runtime' ? jsx : name === '../lib/api' ? api : name === '../lib/platformCapabilities' ? platformRegistry : modules[name] || {default: 'panel'},
   });
   const walk = (node, out = []) => { if (Array.isArray(node)) node.forEach(n => walk(n, out)); else if (node && typeof node === 'object') { out.push(node); walk(node.props?.children, out); walk(node.props?.header, out); } return out; };
   const render = () => {cursor = 0; return walk(exports[exportName](props));};

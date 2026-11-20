@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { runInNewContext } from 'node:vm';
+import {runInNewContext} from 'node:vm';
+import {loadLibrary} from './publishHarness.mjs';
+const platformRegistry = loadLibrary('lib/platformCapabilities.ts');
 
 const require = createRequire(new URL('../../web/frontend/package.json', import.meta.url));
 const ts = require('typescript');
@@ -35,7 +37,7 @@ function calendar(items, props = {}, overrides = {}) {
   runInNewContext(ts.transpileModule(read('components/CalendarPage.tsx'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, {
-    exports, Date, Error, require: name => name === 'react' ? react : name === 'react/jsx-runtime' ? jsx : name === '../lib/api' ? api : {},
+    exports, Date, Error, require: name => name === 'react' ? react : name === 'react/jsx-runtime' ? jsx : name === '../lib/api' ? api : name === '../lib/platformCapabilities' ? platformRegistry : {},
   });
   const walk = (node, out = []) => {
     if (Array.isArray(node)) node.forEach(value => walk(value, out));

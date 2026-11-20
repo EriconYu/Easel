@@ -254,7 +254,132 @@ def _version_directory(persona, task_id):
     return target
 
 
-def save_version(persona, task_id, name, text):
+def _source_snapshot(card, task, brief):
+    """Only the declared inputs, never a claim that a model verified them."""
+    return copy.deepcopy({
+        'brief': brief, 'evidence': brief.get('evidence', []),
+        'inspiration': card.get('inspiration'),
+        'inspiration_references': card.get('inspiration_references', []),
+        'inspiration_adoption': task.get('inspiration_adoptions', [])[-1:],
+    })
+
+
+def generation_snapshot(persona, task_id):
+    """Freeze inputs while building the actual prompt; return its durable identity."""
+    with state._LOCK:
+        data = state._read(persona)
+        card, task = state._card(data, task_id)
+        if task is None:
+            state.save_task(persona, {'task_id': task_id, 'status': 'todo'})
+            data = state._read(persona)
+            card, task = state._card(data, task_id)
+        identifier = uuid.uuid4().hex
+        snapshot = _source_snapshot(card, task, load_brief(persona, task_id))
+        task.setdefault('generation_contexts', {})[identifier] = snapshot
+        state._write(persona, data)
+        return identifier
+
+
+def capture_turn(persona, session_id, turn_id, message):
+    """Bind known prompt inputs to a real turn, scoped to its server-owned project.
+
+    Captures are pending, not proof of successful generation. Ordinary follow-ups
+    inherit only confirmed history; a newly edited brief
+    does not retroactively become evidence for an answer using conversation history.
+    Legacy conversations with no snapshot remain explicitly unverified.
+    """
+    if not state.valid_persona_name(persona) or not state.profile_exists(persona):
+        # Ordinary chat has no project to snapshot; its own persona validation
+        # remains at the chat boundary.
+        return
+    with state._LOCK:
+        data = state._read(persona)
+        matches = [t for t in data['tasks'] if t.get('session_id') == session_id]
+        if not matches:
+            return
+        if len(matches) != 1:
+            raise ValueError('会话关联多个项目，无法确定稿件依据')
+        task = matches[0]
+        turns = task.setdefault('turn_provenance', {})
+        if turn_id in turns:
+            return
+        markers = re.findall(r'"generation_context_id"\s*:\s*"([a-f0-9]{32})"', message)
+        contexts = task.get('generation_contexts', {})
+        identifier = markers[-1] if markers else None
+        if identifier and identifier not in contexts:
+            raise ValueError('创作依据快照不属于当前项目')
+        previous = None
+        for candidate in reversed(turns.values()):
+            if candidate.get('status') == 'completed':
+                previous = candidate
+                break
+            if candidate.get('status') not in {'failed', 'cancelled'} or not candidate.get('history_unchanged'):
+                # Pending/crashed/legacy requests may have changed native history.
+                # Do not pretend that an older known snapshot proves that history.
+                break
+        if identifier:
+            record = {'context_id': identifier, 'context_mode': 'explicit_prompt',
+                      'snapshot': copy.deepcopy(contexts[identifier])}
+        elif previous and previous.get('snapshot'):
+            record = {'context_id': previous['context_id'], 'context_mode': 'inherited_history',
+                      'snapshot': copy.deepcopy(previous['snapshot'])}
+        else:
+            record = {'context_mode': 'unverified', 'snapshot': None}
+        turns[turn_id] = {**record, 'status': 'pending'}
+        state._write(persona, data)
+
+
+def finish_turn(persona, session_id, turn_id, status, *, history_unchanged=False):
+    """Finalize a captured turn; unknown/partial native history fails closed.
+
+    history_unchanged is only valid when the runtime can prove a failed request
+    did not enter its conversation history. Snapshots remain available for audit.
+    Terminal records cannot later be promoted by duplicate/replayed callbacks.
+    """
+    if status not in {'completed', 'failed', 'cancelled'}:
+        raise ValueError('无效对话轮次状态')
+    if not state.valid_persona_name(persona) or not state.profile_exists(persona):
+        return
+    with state._LOCK:
+        data = state._read(persona)
+        matches = [t for t in data['tasks'] if t.get('session_id') == session_id]
+        if not matches:
+            return
+        if len(matches) != 1:
+            raise ValueError('会话关联多个项目，无法确定稿件依据')
+        record = matches[0].get('turn_provenance', {}).get(turn_id)
+        if record is None or record.get('status') != 'pending':
+            return
+        record.update(status=status, history_unchanged=bool(history_unchanged) if status != 'completed' else False)
+        state._write(persona, data)
+
+
+def _version_source(task, card, brief, source_version_id, source_turn_id, versions):
+    if source_version_id and source_turn_id:
+        raise ValueError('稿件来源只能是一个历史版本或一个对话轮次')
+    if source_version_id:
+        original = next((v for v in versions if v['id'] == source_version_id), None)
+        if original is None:
+            raise ValueError('来源版本不属于当前项目')
+        snapshot = {k: copy.deepcopy(original.get(k)) for k in
+                    ('brief', 'evidence', 'inspiration', 'inspiration_references', 'inspiration_adoption')}
+        return snapshot, {'kind': 'version', 'source_version_id': source_version_id}
+    if source_turn_id:
+        record = task.get('turn_provenance', {}).get(source_turn_id, {})
+        if record.get('status') == 'completed' and record.get('snapshot'):
+            return copy.deepcopy(record['snapshot']), {
+                'kind': 'turn', 'source_turn_id': source_turn_id,
+                'context_id': record['context_id'], 'context_mode': record['context_mode'],
+            }
+        return {'brief': None, 'evidence': [], 'inspiration': None,
+                'inspiration_references': [], 'inspiration_adoption': []}, {
+                    'kind': 'unverified_turn', 'source_turn_id': source_turn_id,
+                    'turn_status': record.get('status', 'unknown'),
+                }
+    return _source_snapshot(card, task, brief), {'kind': 'manual_declared'}
+
+
+def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None):
     name = state._text(name, 120)
     text = state._text(text, 200000)
     if not name or not text or '/' in name or '\\' in name:
@@ -265,17 +390,17 @@ def save_version(persona, task_id, name, text):
         if existing is None:
             state.save_task(persona, {'task_id': task_id, 'status': 'todo'})
             data = state._read(persona)
+            card, existing = state._card(data, task_id)
         identifier = uuid.uuid4().hex
         directory = _version_directory(persona, task_id)
         filename = directory / f'稿件版本-{identifier}.md'
         brief = load_brief(persona, task_id)
+        snapshot, provenance = _version_source(existing, card, brief, source_version_id, source_turn_id,
+                                               data.get('versions', {}).get(task_id, []))
         value = {'id': identifier, 'task_id': task_id, 'name': name, 'text': text,
                  'path': filename.relative_to(state.ROOT.parent).as_posix(),
-                 'created_at': state.now(), 'brief': brief,
-                 'evidence': brief.get('evidence', []),
-                 'inspiration': copy.deepcopy(card.get('inspiration')),
-                 'inspiration_references': copy.deepcopy(card.get('inspiration_references', [])),
-                 'inspiration_adoption': copy.deepcopy((existing or {}).get('inspiration_adoptions', [])[-1:])}
+                 'created_at': state.now(), **snapshot, 'provenance': provenance,
+                 'declared_brief': copy.deepcopy(brief)}
         # Exclusive create: same display name never overwrites any earlier version.
         with filename.open('x', encoding='utf-8') as stream:
             stream.write(text)

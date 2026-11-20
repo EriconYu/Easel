@@ -14,6 +14,8 @@ export interface ContentWorkspaceProps {
   onGenerateWorkbench: (card: Pick<WorkbenchCard, 'task_id' | 'title'>, format: WorkbenchFormat, platforms: string[]) => Promise<void>;
   onNavigate: (page: Page) => void;
   jumpPath?: string;
+  /** Repeated file jumps can carry a new token even for the same path. */
+  outputsJump?: {path: string; token: number};
   onJumpHandled?: () => void;
   onPreparePublish?: (draft: {task_id: string; persona: string; version_id: string; title: string; text: string}) => void;
 }
@@ -21,7 +23,8 @@ export interface ContentWorkspaceProps {
 type ProjectTask = WorkbenchTask & {card?: WorkbenchCard};
 const statusLabels = {todo: '待做', doing: '进行中', done: '已完成', blocked: '已阻塞'};
 const message = (error: unknown) => error instanceof Error ? error.message : '操作失败，请重试';
-const schedulePlatforms = ['小红书', '抖音', 'B站', '微信视频号', '快手', '公众号', '微博', '知乎', '今日头条'];
+import { CREATION_PLATFORMS, SCHEDULE_PLATFORMS, platformNotice } from '../lib/platformCapabilities';
+const schedulePlatforms = SCHEDULE_PLATFORMS;
 type ProjectLink = {persona: string; task_id: string; version_id: string};
 type ProjectScheduleInput = ScheduleInput & ProjectLink;
 type ProjectScheduleItem = ScheduleItem & ProjectLink;
@@ -32,7 +35,8 @@ const validDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)
 const validTime = (value: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 
 export default function ContentWorkspace(props: ContentWorkspaceProps) {
-  const {persona, projectId, jumpPath, onJumpHandled, onOpenProject} = props;
+  const {persona, projectId, outputsJump, onJumpHandled, onOpenProject} = props;
+  const jumpPath = outputsJump?.path ?? props.jumpPath;
   const [tab, setTab] = useState<'projects' | 'files'>('projects');
   const [snapshot, setSnapshot] = useState<{persona: string; tasks: ProjectTask[]} | null>(null);
   const [selectedId, setSelectedId] = useState('');
@@ -43,7 +47,7 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
 
   // Clearing a consumed file jump must not force the project tab back open.
   useEffect(() => { setTab('projects'); }, [projectId, persona]);
-  useEffect(() => { if (jumpPath) setTab('files'); }, [jumpPath]);
+  useEffect(() => { if (jumpPath) setTab('files'); }, [jumpPath, outputsJump?.token]);
   useEffect(() => {
     const request = ++scope.current;
     setLoading(true);
@@ -217,7 +221,8 @@ function ContentProject({persona, task, onGenerateWorkbench, onNavigate, onPrepa
       </p>) : <p>没有外部来源记录；不代表已核验的新闻事实。</p>}
     </details>
     <section aria-label="项目创作编辑"><h3>讨论与稿件</h3><p className="content-project-meta">沿用此项目的创作依据、个人灵感与历史版本。完成需手动标记。</p>
-      <label>创作目标平台<select aria-label="创作目标平台" value={target} onChange={e=>setTarget(e.target.value)}>{['通用','小红书','公众号','抖音','视频号','B站','微博','知乎'].map(p=><option key={p}>{p}</option>)}</select></label>
+      <label>创作目标平台<select aria-label="创作目标平台" value={target} onChange={e=>setTarget(e.target.value)}>{CREATION_PLATFORMS.map(p=><option key={p}>{p}</option>)}</select></label>
+      {platformNotice(target) && <p className="content-project-meta" role="note">{platformNotice(target)}</p>}
       <DiscussionEditor persona={persona} taskId={task.task_id} onNavigate={onNavigate}
         onAction={format => onGenerateWorkbench({task_id: task.task_id, title: task.title}, format, [target])} />
     </section>
@@ -247,6 +252,7 @@ function ContentProject({persona, task, onGenerateWorkbench, onNavigate, onPrepa
           <option value="">请选择稿件版本</option>{versions.map(version => <option key={version.id} value={version.id}>{version.name} · {version.created_at} · {version.id}</option>)}
         </select></label>
       </fieldset>
+      {platformNotice(platform) && <p className="content-project-meta" role="note">{platformNotice(platform)}</p>}
       <button className="btn btn-sm" disabled={!canSchedule} onClick={schedule}>创建项目排期</button>
       {scheduling && <p role="status">正在保存并读回核验排期…</p>}
       {scheduleError && <p role="alert" className="workbench-error">{scheduleError}</p>}

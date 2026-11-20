@@ -52,7 +52,9 @@ export interface WorkbenchSkill { id: string; title: string; description: string
 export interface WorkbenchDocument { id: string; title: string; type: string; source: string; available: boolean; reason?: string }
 export interface WorkbenchVersion {
   id: string; name: string; text: string; path: string; created_at: string;
-  brief: WorkbenchBrief; evidence: WorkbenchEvidence[];
+  brief: WorkbenchBrief | null; evidence: WorkbenchEvidence[];
+  provenance?: {kind: 'version' | 'turn' | 'unverified_turn' | 'manual_declared'; source_version_id?: string; source_turn_id?: string; context_id?: string; context_mode?: string};
+  declared_brief?: WorkbenchBrief;
 }
 export function analyzeWorkbench(persona: string): Promise<WorkbenchResult> { return wbPost('analyze', {persona}); }
 export function fetchWorkbenchSkills(): Promise<{items: WorkbenchSkill[]}> { return request('/api/workbench/catalog/skills'); }
@@ -69,8 +71,9 @@ export function saveWorkbenchBrief(persona: string, task_id: string, brief: Work
 export function fetchWorkbenchVersions(persona: string, taskId: string): Promise<{items: WorkbenchVersion[]}> {
   return request(`/api/workbench/versions/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
 }
-export function saveWorkbenchVersion(persona: string, task_id: string, name: string, text: string): Promise<WorkbenchVersion> {
-  return wbPost('version', {persona, task_id, name, text});
+export function saveWorkbenchVersion(persona: string, task_id: string, name: string, text: string,
+  source: {source_version_id?: string; source_turn_id?: string} = {}): Promise<WorkbenchVersion> {
+  return wbPost('version', {persona, task_id, name, text, ...source});
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -514,6 +517,10 @@ export function fetchOutputContent(path: string): Promise<OutputContent> {
 
 /** 媒体文件（图片/视频/音频/HTML/PDF）的原样 URL，用于 <img>/<video>/iframe/下载。 */
 export function mediaUrl(path: string): string {
+  const qr = /^_login\/([a-z0-9-]+)\.png$/.exec(path);
+  if (qr) return `${BASE}/api/login-qr/${encodeURIComponent(qr[1])}`;
+  const bundle = /^_publish\/manual\/(easel-[a-z0-9-]+-[a-f0-9]{12}\.zip)$/.exec(path);
+  if (bundle) return `${BASE}/api/manual-publish/download/${encodeURIComponent(bundle[1])}`;
   return `${BASE}/api/media/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
@@ -696,7 +703,7 @@ export function fetchPublishingPolicy(): Promise<PublishingPolicy> {
 /** Create a local export only; no social platform is contacted. */
 export function exportManualPackage(platform: string, payload: {
   title: string; body: string; tags: string; media: string[]; reviewed: boolean;
-}): Promise<{ path: string; filename: string; published: false }> {
+}): Promise<{ path: string; filename: string; published: false; download_url?: string }> {
   return request(`/api/manual-publish/${encodeURIComponent(platform)}/export`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   });

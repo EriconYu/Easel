@@ -20,8 +20,16 @@ function harness(file, api, props, exportName = 'default') {
     useEffect:fn => effects.push(fn),
   };
   const exports = {};
+  const capabilities = {};
+  runInNewContext(ts.transpileModule(read('lib/platformCapabilities.ts'), {compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText, {exports:capabilities});
+  const draftExports = {};
+  const storage = new Map();
+  const localStorage = {getItem:key=>storage.get(key) ?? null, setItem:(key,value)=>storage.set(key,value)};
+  const window = {confirm:()=>true, dispatchEvent(){}};
+  runInNewContext(ts.transpileModule(read('lib/editorDrafts.ts'), {compilerOptions:{module:ts.ModuleKind.CommonJS, target:ts.ScriptTarget.ES2022}}).outputText,
+    {exports:draftExports, localStorage, window, CustomEvent:class{}, Map});
   runInNewContext(ts.transpileModule(read(file), {compilerOptions:{module:ts.ModuleKind.CommonJS, jsx:ts.JsxEmit.ReactJSX}}).outputText,
-    {exports, Error, require:name=>name==='react'?react:name==='react/jsx-runtime'?jsx:name==='../lib/api'?api:{default:'panel'}});
+    {exports, Error, window, require:name=>name==='react'?react:name==='react/jsx-runtime'?jsx:name==='../lib/api'?api:name==='../lib/editorDrafts'?draftExports:name==='../lib/platformCapabilities'?capabilities:{default:'panel'}});
   const walk = (node, out=[]) => {
     if (Array.isArray(node)) node.forEach(value=>walk(value,out));
     else if (node && typeof node==='object') {out.push(node);walk(node.props?.children,out);}
@@ -41,8 +49,8 @@ function editor(overrides = {}) {
     fetchTaskInspiration:async()=>({enabled:false,references:[],exclude:'',snapshots:[]}),
     saveTaskInspiration:async(...args)=>{calls.push(['inspirations',...args]);return {enabled:args[2],references:args[3],exclude:'',snapshots:[]};},
     saveWorkbenchBrief:async(...args)=>{calls.push(['brief',...args]);return {...args[2],evidence:[]};},
-    saveWorkbenchVersion:async(...args)=>{calls.push(['version',...args]);},
-    fetchWorkbench:async()=>({tasks:[task]}), fetchLastTurn:async()=>({status:'done',text:'真实对话稿'}), ...overrides,
+    saveWorkbenchVersion:async(...args)=>{calls.push(['version',...args]);return {id:'saved-version',name:args[2],text:args[3],brief};},
+    fetchWorkbench:async()=>({tasks:[task]}), fetchLastTurn:async()=>({status:'done',text:'真实对话稿',turn_id:'turn-1'}), ...overrides,
   };
   const h = harness('components/WorkbenchDiscussion.tsx', api, {persona:'甲',taskId:'a',onAction:async format=>calls.push(['action',format]), onNavigate:page=>calls.push(['navigate',page])}, 'DiscussionEditor');
   h.render();h.effects[0]();
@@ -123,7 +131,10 @@ test('取回真实稿新增版本，选择历史与导航', async()=>{
   assert.equal(h.input('稿件文本').props.value,'真实对话稿');
   h.input('版本名').props.onChange({target:{value:'修订版'}});
   h.button('保存新版本').props.onClick();await tick();
-  assert.deepEqual(h.calls.find(call=>call[0]==='version'),['version','甲','a','修订版','真实对话稿']);
+  const saved=h.calls.find(call=>call[0]==='version');
+  assert.deepEqual(saved.slice(0,5),['version','甲','a','修订版','真实对话稿']);
+  assert.equal(saved[5].source_turn_id,'turn-1');
+  assert.equal(saved[5].source_version_id,undefined);
  assert.equal(h.button('前往公众号发布页'),undefined);
  assert.equal(h.calls.filter(call=>call[0]==='navigate').length,0);
 });
