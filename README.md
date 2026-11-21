@@ -246,6 +246,8 @@ easel web                    # 启动 Web 工作台
 
 > 如果提示 `easel: command not found`，就是虚拟环境没激活。也可以不激活、直接用完整路径运行，例如 `.venv/bin/easel doctor`（Windows：`.venv\Scripts\easel.exe doctor`）。
 
+在 macOS 或 Linux 上，也可以在项目根目录运行 `make` 查看帮助。`make run` 前台启动工作台，`make run-daemon` 后台启动并输出 PID 和日志路径。两者默认监听 `127.0.0.1:7860`，可通过 `PORT=7861` 指定其他端口。
+
 启动 Web 工作台后访问 `http://localhost:7860`。安装完成后可以运行 `easel doctor` 检查环境，
 运行 `easel ping` 检查 gateway 和 Agent 连通性。
 
