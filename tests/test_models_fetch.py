@@ -89,6 +89,8 @@ def test_fetch_parses_openai_shape(sandbox, monkeypatch):
     url, headers = capture[0]
     assert url == "https://api.example.com/v1/models"
     assert headers.get("authorization") == "Bearer sk-x"
+    assert headers.get("user-agent") == "Easel/0.3"
+    assert headers.get("accept") == "application/json"
 
 
 def test_fetch_parses_anthropic_shape(sandbox, monkeypatch):
@@ -104,6 +106,7 @@ def test_fetch_parses_anthropic_shape(sandbox, monkeypatch):
     assert url == "https://api.anthropic.com/v1/models"
     assert headers.get("x-api-key") == "sk-ant-x"
     assert headers.get("anthropic-version")
+    assert headers.get("user-agent") == "Easel/0.3"
 
 
 def test_fetch_falls_back_to_bare_list(sandbox, monkeypatch):
@@ -113,6 +116,23 @@ def test_fetch_falls_back_to_bare_list(sandbox, monkeypatch):
                         json={"baseUrl": "https://api.example.com/v1", "key": "k"})
     assert resp.status_code == 200
     assert resp.json()["models"] == ["y", "z"]
+
+
+@pytest.mark.parametrize("prefix,base,path", [
+    ("OPENAI", "https://api.example.com/v1", "/models"),
+    ("ANTHROPIC", "https://api.example.com", "/v1/models"),
+])
+def test_selftest_uses_application_user_agent(sandbox, monkeypatch, prefix, base, path):
+    sandbox.env_file.write_text(f"{prefix}_BASE_URL={base}\n{prefix}_API_KEY=sk-test\n")
+    capture: list = []
+    _stub_opener(monkeypatch, b'{"data":[]}', capture)
+    resp = sandbox.post("/api/settings/models/selftest", json={"channel": "chat"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["results"][0]["ok"] is True
+    url, headers = capture[0]
+    assert url == base + path
+    assert headers.get("user-agent") == "Easel/0.3"
+    assert headers.get("accept") == "application/json"
 
 
 def test_fetch_rejects_private_targets(sandbox, monkeypatch):
