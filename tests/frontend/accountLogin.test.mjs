@@ -105,7 +105,7 @@ function setup() {
   const aliveRef = { current: true };
   let status = { state: 'qr_ready', message: '', qr: '_login/test.png', qrTs: 123 };
   let statusRequest = async () => status;
-  const start = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  const start = (...args) => new Promise((resolve, reject) => pending.push({ resolve, reject, args }));
   const change = key => value => {
     state[key] = typeof value === 'function' ? value(state[key]) : value;
   };
@@ -221,3 +221,70 @@ for (const handler of ['handleLogin', 'handleMpLogin']) {
     await second;
   });
 }
+
+
+test('Xiaohongshu default action requests QR without a manual flag', async () => {
+  const view = setup();
+  const operation = view.handlers.handleLogin({ platform: 'xiaohongshu', name: '小红书', supported: true });
+  assert.deepEqual(Array.from(view.pending[0].args), ['xiaohongshu']);
+  assert.match(view.state.qr.message, /二维码/);
+  view.pending[0].resolve({ mode: 'qr', state: 'starting' });
+  await operation;
+  assert.ok(source.includes('handleLogin(a, true)'));
+});
+
+test('Xiaohongshu optional manual action preserves platform verification instructions', async () => {
+  const view = setup();
+  const operation = view.handlers.handleLogin({ platform: 'xiaohongshu', name: '小红书', supported: true }, true);
+  assert.deepEqual(Array.from(view.pending[0].args), ['xiaohongshu', true]);
+  assert.match(view.state.qr.message, /专用普通 Chrome/);
+  view.pending[0].resolve({ mode: 'qr', state: 'window_login', message: '请在官网验证，无法保证解除平台限制' });
+  await operation;
+  assert.equal(view.state.qr.state, 'window_login');
+  assert.match(view.state.qr.message, /无法保证/);
+  view.setStatus({ state: 'error', message: '专用 Chrome 已关闭，请重新打开手动会话' });
+  await view.state.intervals[0].callback();
+  assert.equal(view.state.qr.state, 'error');
+  assert.match(view.state.qr.message, /重新打开手动会话/);
+  assert.deepEqual(view.state.verifies, []);
+  assert.ok(source.includes('普通Chrome手动登录'));
+});
+
+for (const platform of ['zhihu', 'kuaishou', 'weixin-channels', 'juejin', 'douyin']) {
+  for (const manual of [false, true]) {
+    test(`${platform} selects ${manual ? 'manual window' : 'native QR'} without changing the other action`, async () => {
+      const view = setup();
+      const operation = view.handlers.handleLogin({ platform, name: platform, backend: platform === 'douyin' ? 'douyin' : 'web', supported: true }, manual);
+      assert.deepEqual(Array.from(view.pending[0].args), manual ? [platform, true] : [platform]);
+      assert.match(view.state.qr.message, manual ? /浏览器窗口/ : /二维码/);
+      assert.doesNotMatch(view.state.qr.message, /普通 Chrome/);
+      view.pending[0].resolve({ mode: 'qr', state: manual ? 'window_login' : 'qr_ready', message: '请在官网完成验证' });
+      await operation;
+      assert.equal(view.state.qr.state, manual ? 'window_login' : 'qr_ready');
+    });
+  }
+}
+
+test('offline manual Chrome verification shows reopening instructions and preserves account identity', async () => {
+  const declaration = component.body.statements.find(node =>
+    ts.isVariableStatement(node) && node.declarationList.declarations.some(variable =>
+      variable.name.getText(parsed) === 'runWhoami'));
+  const { outputText: compiled } = ts.transpileModule(declaration.getText(parsed) + '\nrunWhoami;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } });
+  const cached = { loggedIn: true, name: 'Me', avatar: 'https://self.test/avatar' };
+  let identity = { xiaohongshu: cached };
+  let error = '';
+  const verify = runInNewContext(compiled, {
+    Error, useCallback: callback => callback, whoamiRequests: { current: {} }, aliveRef: { current: true },
+    setWhoami: callback => { identity = callback(identity); },
+    getWhoamiCache: () => ({ xiaohongshu: cached }),
+    setAccounts: () => assert.fail('a disconnected browser is not a verified logout'),
+    setWhoamiCache: () => assert.fail('do not cache a disconnected browser as logged out'),
+    setErr: message => { error = message; },
+    accountWhoami: async () => { throw new Error('专用 Chrome 已关闭，请重新打开手动会话'); },
+  });
+  verify('xiaohongshu');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(error, /重新打开手动会话/);
+  assert.equal(identity.xiaohongshu, cached);
+});

@@ -35,6 +35,8 @@ class RunRequest:
     command: tuple[str, ...] = ()
     session_key: str = ""
     codex_auto_approve: bool = False
+    web_search: bool | None = None
+    output_schema: dict | None = None
 
 
 class Adapter(Protocol):

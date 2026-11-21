@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -80,7 +81,7 @@ def _fake_bin(tmp_path: Path) -> Path:
     for tool in ("python3", "git", "curl", "sed", "awk", "grep", "tr", "head", "tail",
                  "date", "mktemp", "df", "basename", "dirname", "cut", "sort", "uniq",
                  "touch", "rm", "mkdir", "cp", "ln", "cat", "wc", "printf", "seq", "ss"):
-        real = shutil.which(tool)
+        real = sys.executable if tool == "python3" else shutil.which(tool)
         if real and not (bin_dir / tool).exists():
             (bin_dir / tool).symlink_to(real)
     return bin_dir

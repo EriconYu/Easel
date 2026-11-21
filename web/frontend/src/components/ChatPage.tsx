@@ -6,8 +6,11 @@ import type { ChatSession, ChatMessage, StreamState } from '../lib/store';
 import { uploadFiles, adoptOversize } from '../lib/api';
 import type { UploadedFile } from '../lib/api';
 import { IconArrowUp, IconStop, IconPlus, IconFile } from './icons';
+import { draftKey, readDraft, writeDraft } from '../lib/editorDrafts';
 
 interface ChatPageProps {
+  projectTitle?: string;
+  onBackProject?: () => Promise<void>;
   apiDirect: boolean;
   session: ChatSession;
   stream?: StreamState;          // 进行中的流式态（来自 App，切页也不丢）
@@ -37,9 +40,28 @@ function greeting(): string {
   return `${g}，想创作点什么？`;
 }
 
-export default function ChatPage({ apiDirect, session, stream, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed }: ChatPageProps) {
-  const [input, setInput] = useState('');
-  const [attachments, setAttachments] = useState<UploadedFile[]>([]);
+export default function ChatPage({ apiDirect, session, stream, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed, projectTitle, onBackProject }: ChatPageProps) {
+  const [projectError, setProjectError] = useState('');
+  const key = draftKey('chat', session.persona || '', session.id);
+  const restored = readDraft<{input: string; attachments: UploadedFile[]}>(key);
+  const [input, setInputValue] = useState(typeof restored?.input === 'string' ? restored.input : '');
+  const [attachments, setAttachmentValues] = useState<UploadedFile[]>(Array.isArray(restored?.attachments) ? restored.attachments : []);
+  const setInput = (value: string) => {
+    writeDraft(key, {...readDraft<Record<string, unknown>>(key), input: value});
+    setInputValue(value);
+  };
+  const setAttachments = (value: UploadedFile[] | ((previous: UploadedFile[]) => UploadedFile[])) => {
+    setAttachmentValues(previous => {
+      const next = typeof value === 'function' ? value(previous) : value;
+      writeDraft(key, {...readDraft<Record<string, unknown>>(key), attachments: next});
+      return next;
+    });
+  };
+  useEffect(() => {
+    const value = readDraft<{input: string; attachments: UploadedFile[]}>(key);
+    setInputValue(typeof value?.input === 'string' ? value.input : '');
+    setAttachmentValues(Array.isArray(value?.attachments) ? value.attachments : []);
+  }, [key]);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [maxMb, setMaxMb] = useState(50);
@@ -176,10 +198,16 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
     </div>
   );
 
+  const projectBar = <div className="workbench-meta" style={{padding:'8px 20px'}}>
+    <div>此对话身份：{session.persona || '通用模式'} · 不随顶部工作画像切换。</div>
+    {projectTitle ? <>内容项目：{projectTitle} <button onClick={() => { void onBackProject?.().catch(e => setProjectError(String(e.message || e))); }}>返回内容项目</button> · 对话结束后在项目里取回正文、审核并另存版本。</> : '自由对话：不会自动建立内容项目或保存正式稿件。正式创作请从灵感或热点进入内容项目。'}
+    {projectError && <p role="alert">{projectError}</p>}
+  </div>;
   // ---- 空态：居中欢迎页 ----
   if (isEmpty) {
     return (
       <div className="chat-page">
+        {projectBar}
         <div className="chat-hero">
           <div className="chat-hero-brand">
             <img src="./static/easel-icon-transparent.png" alt="" />
@@ -212,6 +240,7 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
 
   return (
     <div className="chat-page">
+        {projectBar}
       <div className="chat-messages">
         <div className="chat-thread">
           {displayMessages.map((msg, i) => {

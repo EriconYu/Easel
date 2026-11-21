@@ -11,6 +11,24 @@ import account_stats
 import xhs_publish
 
 
+def test_mac_channel_detects_existing_chrome(monkeypatch):
+    monkeypatch.setattr(xhs_publish.sys, 'platform', 'darwin')
+    monkeypatch.setattr(Path, 'is_file', lambda p: str(p) == '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+    assert xhs_publish._browser_channel() == 'chrome'
+
+
+def test_native_headless_launch_uses_matching_playwright_kernel(tmp_path, monkeypatch):
+    monkeypatch.setattr(xhs_publish, '_cloak_executable', lambda: None)
+    monkeypatch.setattr(xhs_publish, '_browser_channel', lambda: 'chrome')
+    monkeypatch.setattr(xhs_publish, '_profile_dir', lambda _: tmp_path / 'profile')
+    browser = Mock()
+    xhs_publish._launch(browser, False, None, None, login_assets=False)
+    kwargs = browser.chromium.launch_persistent_context.call_args.kwargs
+    assert kwargs['headless'] is True
+    assert 'channel' not in kwargs
+    assert 'executable_path' not in kwargs
+
+
 def response(status=200, payload=None, state=None, url=xhs_publish.EXPLORE_URL):
     return SimpleNamespace(status=status, url=url, json=lambda: payload,
                            text=lambda: "<script>window.__INITIAL_STATE__="

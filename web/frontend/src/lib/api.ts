@@ -18,6 +18,64 @@ export class ApiError extends Error {
   }
 }
 
+export interface WorkbenchSource { kind?:'trend'|'search'; provider?:string; platform:string; url:string; published_at:string|null; fetched_at:string|null; evidence:string }
+export interface WorkbenchCard { task_id:string; title:string; source_title?:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes?:number; analysis_evidence?:string; analysis_engine?:{runtime:string;model:string}|null; analyzed_at?:string; platforms:string[]; evergreen:boolean }
+export type WorkbenchFormat = '讨论'|'母稿'|'口播'|'平台稿';
+export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string }
+export interface WorkbenchResult { updated_at?:string; analyzed_at?:string; cards:WorkbenchCard[]; failures:string[]; pending_sources?:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
+export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[]; days:1|3|7; include_search:boolean }
+const wbPost = <T,>(path:string, body:unknown):Promise<T> => request(`/api/workbench/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[]}>{return request(`/api/workbench/${encodeURIComponent(persona)}`)}
+export interface WorkbenchEngines { search:{provider:string;providers:{id:string;label:string;configured:boolean}[];key_configured:boolean}; analysis:{runtime:string;model:string;label:string} }
+export function fetchWorkbenchEngines():Promise<WorkbenchEngines>{return request('/api/workbench/engines')}
+export function saveWorkbenchSearchSettings(body:{provider:string;api_key?:string;clear_key?:boolean}):Promise<WorkbenchEngines['search']>{return wbPost('search-settings',body)}
+export function recommendWorkbench(body:WorkbenchInput):Promise<WorkbenchResult>{return wbPost('recommend',body)}
+export function saveWorkbenchTask(persona:string,task:Partial<WorkbenchTask>&{task_id:string}):Promise<WorkbenchTask>{return wbPost('task',{persona,task})}
+export function dismissWorkbench(persona:string,task_id:string):Promise<{ok:boolean}>{return wbPost('feedback',{persona,task_id})}
+export function contextWorkbench(persona:string,task_id:string,format:WorkbenchFormat,platforms:string[]):Promise<{context:string}>{return wbPost('context',{persona,task_id,format,platforms})}
+
+export interface WorkbenchEvidence {
+  id: string; title: string; source: string; locator: string;
+  text: string; sha256: string; truncated?: boolean;
+}
+export interface WorkbenchBrief {
+  viewpoint: string;
+  skill_ids: string[];
+  document_ids: string[];
+  strict_mode: boolean;
+  allow_web: boolean;
+  reference_title: string;
+  reference_text: string;
+  evidence?: WorkbenchEvidence[];
+}
+export interface WorkbenchSkill { id: string; title: string; description: string; source: string }
+export interface WorkbenchDocument { id: string; title: string; type: string; source: string; available: boolean; reason?: string }
+export interface WorkbenchVersion {
+  id: string; name: string; text: string; path: string; created_at: string;
+  brief: WorkbenchBrief | null; evidence: WorkbenchEvidence[];
+  provenance?: {kind: 'version' | 'turn' | 'unverified_turn' | 'manual_declared'; source_version_id?: string; source_turn_id?: string; context_id?: string; context_mode?: string};
+  declared_brief?: WorkbenchBrief;
+}
+export function analyzeWorkbench(persona: string): Promise<WorkbenchResult> { return wbPost('analyze', {persona}); }
+export function fetchWorkbenchSkills(): Promise<{items: WorkbenchSkill[]}> { return request('/api/workbench/catalog/skills'); }
+export function fetchWorkbenchDocuments(): Promise<{items: WorkbenchDocument[]}> { return request('/api/workbench/catalog/documents'); }
+export function fetchWorkbenchBrief(persona: string, taskId: string): Promise<WorkbenchBrief> {
+  return request(`/api/workbench/brief/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+}
+export function saveWorkbenchBrief(persona: string, task_id: string, brief: WorkbenchBrief): Promise<WorkbenchBrief> {
+  const {viewpoint, skill_ids, document_ids, strict_mode, allow_web, reference_title, reference_text} = brief;
+  return wbPost('brief', {persona, task_id, brief: {
+    viewpoint, skill_ids, document_ids, strict_mode, allow_web, reference_title, reference_text,
+  }});
+}
+export function fetchWorkbenchVersions(persona: string, taskId: string): Promise<{items: WorkbenchVersion[]}> {
+  return request(`/api/workbench/versions/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+}
+export function saveWorkbenchVersion(persona: string, task_id: string, name: string, text: string,
+  source: {source_version_id?: string; source_turn_id?: string} = {}): Promise<WorkbenchVersion> {
+  return wbPost('version', {persona, task_id, name, text, ...source});
+}
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   // 全部是动态应用接口（登录态/数据等），禁止浏览器 HTTP 缓存——否则 /api/accounts 等可能被启发式
   // 缓存住旧响应（曾表现为“扫码登录后卡片仍显示未登录”）。调用方可用 options.cache 覆盖。
@@ -309,6 +367,9 @@ export interface ScheduleItem {
   source?: string;        // manual | publish-page | chat | scheduler
   event_type?: string;    // event 专属：节日/电商/平台活动/行业
   end_date?: string;      // event 专属：活动区间结束日
+  persona?: string;      // 关联工作台内容项目；旧自由日历不要求填写
+  task_id?: string;
+  version_id?: string;
 }
 export type ScheduleInput = Omit<ScheduleItem, 'id'>;
 export interface ScheduleContext {
@@ -334,6 +395,30 @@ export function updateSchedule(id: string, item: ScheduleInput): Promise<Schedul
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(item),
   });
 }
+export function canonicalPlatform(name: string = ''): string {
+  return ({'微信公众号':'公众号','微信视频号':'视频号','推特 X':'X'} as Record<string,string>)[name] || name;
+}
+export async function savePublishSchedule(input: ScheduleInput): Promise<ScheduleItem> {
+  const records = await fetchSchedule();
+  const linked = input.persona && input.task_id ? records.filter(item =>
+    item.persona === input.persona && item.task_id === input.task_id &&
+    (item.version_id || '') === (input.version_id || '') && canonicalPlatform(item.platform) === canonicalPlatform(input.platform)) : [];
+  let prior = linked.find(item => item.date === input.date && (item.time || '') === (input.time || ''));
+  if (!prior && input.status === 'published') {
+    const pending = linked.filter(item => item.status !== 'published');
+    if (pending.length > 1) throw new Error('此版本有多个待发布排期，请在内容日历中选择原记录回填');
+    prior = pending[0];
+  }
+  if (prior?.status === 'published' && input.status !== 'published') throw new Error('原记录已发布，不能用存草稿覆盖');
+  const desired = {...prior, ...input};
+  const saved = prior ? await updateSchedule(prior.id, desired) : await createSchedule(desired);
+  const actual = (await fetchSchedule()).find(item => item.id === saved.id);
+  if (!actual || ['title','status','url','note','persona','task_id','version_id','platform'].some(key =>
+    ((actual as unknown as Record<string,unknown>)[key] || '') !== ((desired as unknown as Record<string,unknown>)[key] || ''))) {
+    throw new Error('排期保存后的读回不一致，未确认保存成功，请打开日历核对');
+  }
+  return actual;
+}
 export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
   return request(`/api/schedule/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
@@ -341,9 +426,33 @@ export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
 // ---- 选题库 ----
 export interface Idea {
   id: string; title: string; note: string; source: string; status: string; created: number;
+  original_text: string; persona: string; topic: string; tags: string[];
+  good_performance: boolean; priority_reuse: boolean; publish_url: string; review_note: string;
+  developments: Record<string, {task_id: string; session_id: string}>;
 }
-export type IdeaInput = { title: string; note?: string; source?: string; status?: string };
-export function fetchIdeas(): Promise<Idea[]> { return request('/api/ideas'); }
+export type IdeaInput = Partial<Omit<Idea, 'id' | 'created' | 'developments'>>;
+export interface IdeaReference { idea_id: string; version_id?: string }
+export function fetchIdeas(filters: {q?: string; persona?: string; exclude?: string; good_only?: boolean} = {}): Promise<Idea[]> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) if (value !== undefined) params.set(key, String(value));
+  return request(`/api/ideas?${params}`);
+}
+export function developIdea(id: string, persona: string, format: WorkbenchFormat, platforms: string[], references: IdeaReference[]): Promise<{idea: Idea; task: WorkbenchTask; context: string}> {
+  return request(`/api/ideas/${encodeURIComponent(id)}/develop`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({persona, format, platforms, references})});
+}
+export function fetchIdeaVersions(id: string, persona: string): Promise<WorkbenchVersion[]> {
+  return request(`/api/ideas/${encodeURIComponent(id)}/versions?persona=${encodeURIComponent(persona)}`);
+}
+export interface TaskInspiration {
+  enabled: boolean; references: IdeaReference[]; exclude: string;
+  snapshots: {id: string; title: string; version_id?: string; version_name?: string}[];
+}
+export function fetchTaskInspiration(persona: string, taskId: string): Promise<TaskInspiration> {
+  return request(`/api/workbench/inspiration/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+}
+export function saveTaskInspiration(persona: string, task_id: string, enabled: boolean, references: IdeaReference[]): Promise<TaskInspiration> {
+  return wbPost('inspiration', {persona,task_id,enabled,references});
+}
 export function createIdea(item: IdeaInput): Promise<Idea> {
   return request('/api/ideas', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(item) });
 }
@@ -416,6 +525,10 @@ export function fetchOutputContent(path: string): Promise<OutputContent> {
 
 /** 媒体文件（图片/视频/音频/HTML/PDF）的原样 URL，用于 <img>/<video>/iframe/下载。 */
 export function mediaUrl(path: string): string {
+  const qr = /^_login\/([a-z0-9-]+)\.png$/.exec(path);
+  if (qr) return `${BASE}/api/login-qr/${encodeURIComponent(qr[1])}`;
+  const bundle = /^_publish\/manual\/(easel-[a-z0-9-]+-[a-f0-9]{12}\.zip)$/.exec(path);
+  if (bundle) return `${BASE}/api/manual-publish/download/${encodeURIComponent(bundle[1])}`;
   return `${BASE}/api/media/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
@@ -499,6 +612,7 @@ export interface AccountItem {
   platform: string;
   name: string;
   backend: string;      // xhs | web | biliup | unsupported
+  loginWindow?: boolean; // window-only (e.g. X), no native QR mode
   supported: boolean;
   loggedIn: boolean;
   note: string;
@@ -597,7 +711,7 @@ export function fetchPublishingPolicy(): Promise<PublishingPolicy> {
 /** Create a local export only; no social platform is contacted. */
 export function exportManualPackage(platform: string, payload: {
   title: string; body: string; tags: string; media: string[]; reviewed: boolean;
-}): Promise<{ path: string; filename: string; published: false }> {
+}): Promise<{ path: string; filename: string; published: false; download_url?: string }> {
   return request(`/api/manual-publish/${encodeURIComponent(platform)}/export`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   });
@@ -637,8 +751,8 @@ export function submitPublishSms(platform: string, code: string): Promise<{ ok: 
   });
 }
 
-export function startLogin(platform: string): Promise<LoginStart> {
-  return request<LoginStart>(`/api/login/${encodeURIComponent(platform)}?restart=true`, { method: 'POST' });
+export function startLogin(platform: string, manual = false): Promise<LoginStart> {
+  return request<LoginStart>(`/api/login/${encodeURIComponent(platform)}?restart=true${manual ? '&manual=true' : ''}`, { method: 'POST' });
 }
 
 export function loginStatus(platform: string): Promise<LoginStatus> {
@@ -853,7 +967,7 @@ export function streamChat(
 }
 
 /** 取某会话最近一轮的完整结果（SSE 断线后据此取回）。 */
-export function fetchLastTurn(sessionId: string, turnId?: string): Promise<{ status: string; text: string; turn_id?: string }> {
+export function fetchLastTurn(sessionId: string, turnId?: string): Promise<{ status: string; text: string; turn_id?: string; clean_end?: boolean; stop_reason?: string }> {
   const query = turnId ? `?turn_id=${encodeURIComponent(turnId)}` : '';
   return request(`/api/chat/last/${encodeURIComponent(sessionId)}${query}`);
 }

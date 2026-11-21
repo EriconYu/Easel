@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import login_state  # noqa: E402
 import login_qr
 import login_transport
+import xhs_manual_browser
 import content_guard  # noqa: E402  出站内容安全闸门
 
 # --------------------------------------------------------------------------- #
@@ -223,7 +224,16 @@ def _clear_stale_chrome_locks(profile: Path) -> None:
 
 
 def _browser_channel() -> str | None:
-    """Cloak 找不到时，有头登录才退回本机 Chrome/Edge。"""
+    """Reuse an installed browser for headed and QR/headless flows."""
+    if os.name != 'nt' and sys.platform == 'darwin':
+        for channel, app, binary in (
+            ('chrome', 'Google Chrome.app', 'Google Chrome'),
+            ('msedge', 'Microsoft Edge.app', 'Microsoft Edge'),
+        ):
+            if any((base / app / 'Contents' / 'MacOS' / binary).is_file()
+                   for base in (Path('/Applications'), Path.home() / 'Applications')):
+                return channel
+        return None
     if os.name != "nt":
         return None
     pf = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files"))
@@ -246,7 +256,7 @@ def _browser_channel() -> str | None:
 
 
 def _login_error(page) -> str:
-    """区分明确 IP 风险和其它错误页，不泄露 URL 中的登录参数。"""
+    """描述本次会话被拦截，不能仅凭错误码判断公网 IP。"""
     try:
         url = page.url or ""
         title = page.title() or ""
@@ -265,8 +275,8 @@ def _login_error(page) -> str:
             return ""
         if code == "300012" or "IP存在风险" in re.sub(r"\s+", "", text).upper():
             detail = f"（错误码 {code}）" if code else ""
-            return (f"小红书返回 IP 风险限制{detail}，二维码无法获取。"
-                    "请在可信网络重试；服务器/机房出口可能被平台限制，Easel 无法保证解除风控。")
+            return (f"小红书拦截了本次会话或请求{detail}，二维码无法获取。"
+                    "不能仅凭此错误码确认公网 IP 存在风险。可尝试普通 Chrome 手动登录，无法保证解除平台限制。")
         detail = f"（错误码 {code}）" if code else ""
         return f"小红书登录被平台拦截{detail}，不一定是 IP 问题。请检查网络，或使用 --headed 查看平台提示。"
     except Exception:
@@ -274,7 +284,7 @@ def _login_error(page) -> str:
 
 
 def _risk_blocked(page) -> bool:
-    return "IP 风险限制" in _login_error(page)
+    return "本次会话或请求" in _login_error(page)
 
 
 def _visible_login_element(page, selectors: str):
@@ -531,7 +541,10 @@ def _state_account(state: dict) -> dict | None:
     account = _unwrap_state(user.get("userInfo")) if isinstance(user, dict) else None
     if (not isinstance(account, dict) or _unwrap_state(user.get("loggedIn")) is not True
             or not isinstance(account.get("userId"), str)
-            or not re.fullmatch(r"[A-Za-z0-9_-]+", account["userId"])):
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", account["userId"])
+            or account["userId"].lower() in ("visitor", "guest", "anonymous")
+            or any(_unwrap_state(record.get(key)) is True
+                   for record in (user, account) for key in ("visitor", "isVisitor", "guest"))):
         return None
     identity = _account_identity(account)
     return {**account, "userName": identity["name"], "userAvatar": identity["avatar"]}
@@ -997,8 +1010,11 @@ def _fill_and_submit(page, title, content, tags):
 # --------------------------------------------------------------------------- #
 # 命令
 # --------------------------------------------------------------------------- #
-def _launch(p, headed: bool, base: str | None, proxy: str | None, *, login_assets: bool = True):
+def _launch(p, headed: bool, base: str | None, proxy: str | None, *, login_assets: bool = True,
+            session_mode: str | None = None):
     profile = _profile_dir(base)
+    if session_mode != 'native' and xhs_manual_browser.selected(profile):
+        return xhs_manual_browser.connect(p, profile)
     profile.mkdir(parents=True, exist_ok=True)
     args = list(LAUNCH_ARGS)
     kwargs = dict(headless=not headed,
@@ -1012,10 +1028,8 @@ def _launch(p, headed: bool, base: str | None, proxy: str | None, *, login_asset
     cloak = _cloak_executable()
     if cloak:
         kwargs["executable_path"] = str(cloak)
-    elif headed:
-        channel = _browser_channel()
-        if channel:
-            kwargs["channel"] = channel
+    # Without an explicitly configured/installed Cloak kernel, use Playwright's
+    # matching Chromium. System Chrome belongs to the separate manual mode.
     last: Exception | None = None
     for attempt in range(2):
         try:
@@ -1086,6 +1100,74 @@ def _query_safe(page, selector: str):
         return None
 
 
+def _manual_account(context):
+    """只观察用户已有的官方页面，不请求、导航或新建页面。"""
+    for page in context.pages:
+        try:
+            host = urlparse(page.url or "").hostname
+            if host == "www.xiaohongshu.com":
+                if _login_error(page) or _visible_login_element(page, SELECTORS["logged_out"]):
+                    continue
+                state = page.evaluate("""() => {
+                    const user = window.__INITIAL_STATE__?.user;
+                    return user ? JSON.parse(JSON.stringify({user: {
+                        loggedIn: user.loggedIn, userInfo: user.userInfo
+                    }})) : {};
+                }""")
+                account = _state_account(state) if isinstance(state, dict) else None
+                if account is not None:
+                    return {**account, "_source": "web"}
+            elif host == "creator.xiaohongshu.com" and _is_logged_in(page):
+                identity = _page_account_identity(page)
+                if all(identity.values()):
+                    # 创作平台严格登录态和真实账号控件，不凭空生成 userId。
+                    return {"userName": identity["name"], "userAvatar": identity["avatar"],
+                            "_source": "creator"}
+        except Exception:
+            # 用户正在跳转/验证时执行上下文可能暂不可用，等下次观察。
+            continue
+    return None
+
+
+def cmd_manual_login(a) -> int:
+    from playwright.sync_api import sync_playwright
+
+    sf = getattr(a, "status_file", None)
+    profile = _profile_dir(a.profile_base)
+    timeout = min(max(a.timeout or 180, 1), 300)
+    login_state.write_status(sf, "starting", "正在打开专用普通 Chrome…")
+    lock = _ProfileLock(profile)
+    try:
+        lock.acquire(4)
+        with sync_playwright() as p:
+            ctx = xhs_manual_browser.open_session(p, profile)
+            try:
+                login_state.write_status(sf, "window_login",
+                    "请在专用普通 Chrome 的官方页面扫码并完成验证。"
+                    "使用独立登录目录，不访问日常 Chrome 资料；请保持专用窗口打开。无法保证解除平台限制。")
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    if not ctx._browser.is_connected() or not ctx._context.pages:
+                        raise xhs_manual_browser.ManualBrowserError("专用 Chrome 已关闭，请重新打开手动会话")
+                    if _manual_account(ctx) is not None:
+                        xhs_manual_browser.activate(profile, 'manual')
+                        login_state.write_status(sf, "success", "官方页面登录已确认，请保持专用 Chrome 打开以便复用会话；发布时另行校验创作权限")
+                        return 0
+                    time.sleep(1)
+                login_state.write_status(sf, "expired", "手动登录验证超时，未确认完整登录；请重新打开手动会话。专用 Chrome 可自行关闭。")
+                return 1
+            finally:
+                ctx.close()
+    except (xhs_manual_browser.ManualBrowserError, TimeoutError) as error:
+        login_state.write_status(sf, "error", str(error))
+        return 1
+    except Exception:
+        login_state.write_status(sf, "error", "手动 Chrome 校验失败，请重新打开手动会话；尚未确认账号退出")
+        return 1
+    finally:
+        lock.release()
+
+
 def cmd_login(a) -> int:
     """headless 友好登录：把二维码抠成 PNG 供扫码，轮询登录成功后持久化 cookie。
     REF login.go FetchQrcodeImage/WaitForLogin。远程无桌面环境靠图片扫码，非有头窗口。"""
@@ -1093,6 +1175,9 @@ def cmd_login(a) -> int:
         from playwright.sync_api import sync_playwright
     except Exception as e:
         _die(f"需要 playwright：{e}", 3)
+
+    if getattr(a, "manual_browser", False):
+        return cmd_manual_login(a)
 
     qr_out = Path(a.qr_out).expanduser() if a.qr_out else DEFAULT_QR_OUT
     timeout_s = a.timeout or 180
@@ -1108,13 +1193,15 @@ def cmd_login(a) -> int:
     try:
         with sync_playwright() as p:
             try:
-                ctx = _launch(p, headed=a.headed, base=a.profile_base, proxy=_proxy(a.proxy, a.no_proxy))
+                ctx = _launch(p, headed=a.headed, base=a.profile_base, proxy=_proxy(a.proxy, a.no_proxy),
+                              session_mode='native')
             except Exception as e:
-                login_state.write_status(sf, "error", "浏览器没能打开。请关闭弹窗，等 10 秒再点登录，不要连点。")
+                login_state.write_status(sf, "error", "浏览器启动失败，请检查 Chrome／浏览器内核和登录日志；若缺少内核或依赖，等待后重试不会自动修复。")
                 _die(f"启动浏览器失败：{e}", 1)
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             try:
                 if _creator_account(ctx) is not None:
+                    xhs_manual_browser.activate(_profile_dir(a.profile_base), 'native')
                     login_state.write_status(sf, "success", "已登录")
                     print("✅ 已登录（创作平台账号接口已确认），无需扫码")
                     return 0
@@ -1142,6 +1229,7 @@ def cmd_login(a) -> int:
                         pass
 
                 if _is_logged_in(page):
+                    xhs_manual_browser.activate(_profile_dir(a.profile_base), 'native')
                     login_state.write_status(sf, "success", "已登录")
                     print("✅ 已登录（cookie 已在持久化目录），无需扫码")
                     return 0
@@ -1151,6 +1239,7 @@ def cmd_login(a) -> int:
                 try:
                     qr = _capture_login_qr(page, qr_out, creator_only=explore_failed)
                     if not qr:
+                        xhs_manual_browser.activate(_profile_dir(a.profile_base), 'native')
                         login_state.write_status(sf, "success", "已登录")
                         print("✅ 已登录（创作平台登录态已在持久化目录），无需扫码")
                         return 0
@@ -1198,6 +1287,7 @@ def cmd_login(a) -> int:
                         logged_in = _creator_account(ctx) is not None
                         next_account_check = time.monotonic() + 5
                     if logged_in:
+                        xhs_manual_browser.activate(_profile_dir(a.profile_base), 'native')
                         login_state.write_status(sf, "success", "登录成功")
                         print("✅ 登录成功，cookie 已持久化，下次免登")
                         try:
@@ -1314,9 +1404,18 @@ def _publish(a, kind: str) -> int:
     try:
         with sync_playwright() as p:
             ctx = _launch(p, headed=a.headed, base=a.profile_base, proxy=_proxy(a.proxy, a.no_proxy))
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.set_default_timeout(300000)
             try:
+                if isinstance(ctx, xhs_manual_browser.BorrowedContext):
+                    account = _manual_account(ctx)
+                    creator = _creator_account(ctx)
+                    if (creator is None or (account and account.get("userId")
+                            and creator.get("userId") != account["userId"])):
+                        _die("尚未确认当前账号创作权限，请在专用 Chrome 创作平台完成验证")
+                    # 发布操作使用自己的页面，不能导航或关闭用户的登录页。
+                    page = ctx.new_page()
+                else:
+                    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                page.set_default_timeout(300000)
                 page.goto(PUBLISH_URL, wait_until="domcontentloaded")
                 page.wait_for_timeout(1500)
                 # 登录态探测容忍导航竞态：发布页也可能仍在跳转，跳转瞬间裸 query 会抛
@@ -1383,8 +1482,20 @@ def cmd_whoami(a) -> int:
     try:
         with sync_playwright() as p:
             ctx = _launch(p, headed=False, base=a.profile_base, proxy=_proxy(a.proxy, a.no_proxy))
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
             try:
+                if isinstance(ctx, xhs_manual_browser.BorrowedContext):
+                    account = _manual_account(ctx)
+                    result["loggedIn"] = account is not None
+                    result["webLoggedIn"] = bool(account and account.get("_source") == "web")
+                    if account and account.get("_source") == "creator":
+                        result["creatorAuthorized"] = True
+                    if account is not None:
+                        result.update(_account_identity(account))
+                    else:
+                        result["error"] = "未能从现有官方页面确认账号状态，请在专用 Chrome 完成验证后重试；尚未确认账号退出"
+                    print(json.dumps(result, ensure_ascii=False))
+                    return 0
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 account = _authenticated_account(ctx)
                 if account is not None:
                     result["loggedIn"] = True
@@ -1497,6 +1608,7 @@ def main() -> int:
 
     p = sub.add_parser("login", help="扫码登录并持久化（headless：抠二维码成图片）")
     add_common(p)
+    p.add_argument("--manual-browser", action="store_true", help="专用普通 Chrome 手动登录并复用本机会话")
     p.add_argument("--qr-out", help=f"二维码图片输出路径（默认 {DEFAULT_QR_OUT}）")
     p.add_argument("--status-file", help="登录状态 JSON 输出路径（供 Web 后端轮询）")
     p.add_argument("--timeout", type=int, help="等待扫码超时秒数（默认 180）")

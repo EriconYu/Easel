@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "shared" / "scripts"))
 import social_stats as ss  # noqa: E402
+import calendar_store  # noqa: E402
 
 # PROJECT_ROOT：优先 EASEL_ROOT env，否则按 __file__ 上溯（workspace 拍平副本会算错，
 # 故 env 兜底不可省，见 manifest.py 同款说明）。
@@ -58,6 +59,8 @@ def atomic_write(path: Path, data: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
@@ -88,6 +91,11 @@ def _parse_dt(s: str):
 # record
 # --------------------------------------------------------------------------- #
 def cmd_record(args) -> None:
+    with calendar_store.lock(Path(args.data)):
+        _record_locked(args)
+
+
+def _record_locked(args) -> None:
     path = Path(args.data)
     data = load(path)
     new_id = max((e.get("id", 0) for e in data["entries"]), default=0) + 1

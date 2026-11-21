@@ -34,6 +34,11 @@ def client(tmp_path, monkeypatch):
     login_dir.mkdir()
     monkeypatch.setattr(web, "LOGIN_DIR", login_dir)
     monkeypatch.setattr(web, "OUTPUTS_DIR", tmp_path)
+    # Dispatch tests explicitly opt into automation in their isolated settings;
+    # never inherit the workstation's manual-only publishing preference.
+    env = tmp_path / '.env'
+    env.write_text('EASEL_PUBLISH_MODE=automated\n', encoding='utf-8')
+    monkeypatch.setattr(web, 'ENV_FILE', env)
     # 内容日历文件是导入期算出的模块常量（OUTPUTS_DIR / "_schedule.json"），
     # 不显式改掉的话，发布用例会往用户真实的内容日历里写测试条目。
     monkeypatch.setattr(web, "SCHEDULE_FILE", tmp_path / "_schedule.json")

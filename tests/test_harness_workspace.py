@@ -121,7 +121,7 @@ def test_openclaw_sync_uses_shared_workspace_and_preserves_instruction_source(tm
     assert "当前执行引擎：OpenClaw" in instructions
     assert f'cd "{root}"' in instructions
     assert (target / "easel-profiles").resolve() == root / "profiles"
-    assert (target / "outputs").resolve() == root / "outputs"
+    assert (target / "outputs").resolve() == (root / "outputs").resolve()
     original_skills = {skill.name for skill in (root / "skills" / "builtin").iterdir() if skill.is_dir()}
     assert {skill.name for skill in (target / "skills").iterdir()} == original_skills
     assert (target / "shared" / "scripts" / "web_publisher.py").is_file()

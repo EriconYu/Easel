@@ -3,8 +3,10 @@ import { fetchPublishingPolicy } from '../lib/api';
 import type { PublishingPolicy } from '../lib/api';
 import AutomatedPublishPage from './PublishPage';
 import ManualPublishPage from './ManualPublishPage';
+import type { ProjectPublishDraft } from './ProjectPublishSource';
+export type { ProjectPublishDraft } from './ProjectPublishSource';
 
-export default function PublishingPage({ persona }: { persona: string }) {
+export default function PublishingPage({ persona, projectDraft }: { persona: string; projectDraft?: ProjectPublishDraft }) {
   const [policy, setPolicy] = useState<PublishingPolicy | null>(null);
   const [mode, setMode] = useState<PublishingPolicy['mode']>('automated');
   const [error, setError] = useState('');
@@ -45,7 +47,7 @@ export default function PublishingPage({ persona }: { persona: string }) {
           : '保留原有账号检查、预检、确认及自动提交流程。'}</span>
     </div>
     <div className="publishing-mode-content">
-      {manual ? <ManualPublishPage persona={persona} /> : <AutomatedPublishPage persona={persona} />}
+      {manual ? <ManualPublishPage key={persona} persona={persona} projectDraft={projectDraft} /> : <AutomatedPublishPage key={persona} persona={persona} projectDraft={projectDraft} />}
     </div>
   </div>;
 }

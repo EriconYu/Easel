@@ -26,57 +26,71 @@ export default function SkillDrawer({ skillName, persona, onClose, onConfigured 
   const [result, setResult] = useState('');
   const [running, setRunning] = useState(false);
   const [runErr, setRunErr] = useState('');
-  const reqSeq = useRef(0);
+  const detailSeq = useRef(0);
+  const saveSeq = useRef(0);
+  const runSeq = useRef(0);
 
   const loadDetail = () => {
-    let ignore = false;
+    const seq = ++detailSeq.current;
+    setDetail(null); setLoadErr('');
     fetchSkillDetail(skillName)
-      .then((d) => { if (!ignore) { setDetail(d); setLoadErr(''); } })
-      .catch(() => { if (!ignore) setLoadErr('加载 SKILL 详情失败'); });
-    return () => { ignore = true; };
+      .then((d) => { if (seq === detailSeq.current) { setDetail(d); setLoadErr(''); } })
+      .catch(() => { if (seq === detailSeq.current) setLoadErr('加载 SKILL 详情失败'); });
+    return () => { detailSeq.current++; };
   };
 
   useEffect(loadDetail, [skillName]);
+  useEffect(() => {
+    setEnvInputs({}); setSaving(false); setSavedMsg('');
+    return () => { saveSeq.current++; };
+  }, [skillName]);
+  useEffect(() => {
+    setRunning(false); setResult(''); setRunErr(''); setInput('');
+    return () => { runSeq.current++; };
+  }, [skillName, persona]);
 
   const bodyHtml = useMemo(() => renderMarkdown(detail?.body || ''), [detail?.body]);
   const resultHtml = useMemo(() => renderMarkdown(result), [result]);
 
   const handleSaveEnv = async () => {
+    if (saving) return;
     const updates = Object.fromEntries(
       Object.entries(envInputs).filter(([, v]) => v.trim() !== '')
     );
     if (Object.keys(updates).length === 0) { setSavedMsg('没有填写新值'); return; }
     setSaving(true);
     setSavedMsg('');
+    const saveId = ++saveSeq.current;
     try {
       await saveEnv(updates);
+      if (saveId !== saveSeq.current) return;
       setEnvInputs({});
-      const seq = ++reqSeq.current;
+      const seq = ++detailSeq.current;
       const fresh = await fetchSkillDetail(skillName);
-      if (seq === reqSeq.current) setDetail(fresh);
+      if (saveId !== saveSeq.current) return;
+      if (seq === detailSeq.current) setDetail(fresh);
       setSavedMsg('已保存 ✓');
       onConfigured();
-      setTimeout(() => setSavedMsg(''), 2500);
     } catch (e) {
-      setSavedMsg(e instanceof Error ? e.message : '保存失败');
+      if (saveId === saveSeq.current) setSavedMsg(e instanceof Error ? e.message : '保存失败');
     } finally {
-      setSaving(false);
+      if (saveId === saveSeq.current) setSaving(false);
     }
   };
 
   const handleRun = async () => {
-    if (!input.trim()) return;
-    const seq = ++reqSeq.current;
+    if (!input.trim() || running) return;
+    const seq = ++runSeq.current;
     setRunning(true);
     setRunErr('');
     setResult('');
     try {
       const res = await executeSkill(skillName, input.trim(), persona || undefined);
-      if (seq === reqSeq.current) setResult(res.response);
+      if (seq === runSeq.current) setResult(res.response);
     } catch (e) {
-      if (seq === reqSeq.current) setRunErr(e instanceof Error ? e.message : '执行失败');
+      if (seq === runSeq.current) setRunErr(e instanceof Error ? e.message : '执行失败');
     } finally {
-      if (seq === reqSeq.current) setRunning(false);
+      if (seq === runSeq.current) setRunning(false);
     }
   };
 

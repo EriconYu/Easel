@@ -85,8 +85,9 @@ export default function AccountsPage() {
             account.platform === platform ? { ...account, loggedIn: r.loggedIn } : account));
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (aliveRef.current && whoamiRequests.current[platform] === sequence) {
+          if (platform === 'xiaohongshu') setErr(error instanceof Error ? error.message : '无法校验手动 Chrome 会话，请重新打开手动会话');
           setWhoami((previous) => {
             const updated = { ...previous };
             const cached = getWhoamiCache()[platform];
@@ -161,6 +162,37 @@ export default function AccountsPage() {
     load();
   }, [stopPoll, load]);
 
+  // A browser task can fail after authentication succeeded. Verify the saved
+  // session independently; never make an error dialog force a fresh login.
+  const recheckLogin = useCallback(async () => {
+    if (!qr || !['error', 'expired'].includes(qr.state)) return;
+    const platform = qr.platform;
+    const sequence = ++qrRequest.current;
+    stopPoll();
+    whoamiRequests.current[platform] = (whoamiRequests.current[platform] || 0) + 1;
+    setBusy(platform + ':verify');
+    try {
+      const result = await accountWhoami(platform, true);
+      if (!aliveRef.current || qrRequest.current !== sequence) return;
+      setWhoami((previous) => ({ ...previous, [platform]: result }));
+      setWhoamiCache(platform, result);
+      setAccounts((previous) => previous.map((account) => account.platform === platform
+        ? { ...account, loggedIn: result.loggedIn } : account));
+      setQr((previous) => previous && ({ ...previous,
+        state: result.loggedIn ? 'success' : 'error', qr: '',
+        message: result.loggedIn ? '已核验现有登录态，无需重新扫码'
+          : '未检测到可复用的登录态，请确认在 Easel 专用窗口完成登录后再核验',
+      }));
+    } catch (error) {
+      if (!aliveRef.current || qrRequest.current !== sequence) return;
+      setQr((previous) => previous && ({ ...previous, state: 'error', qr: '',
+        message: `暂时无法核验，原登录态已保留。${error instanceof Error ? error.message : '请稍后重试'}`,
+      }));
+    } finally {
+      if (aliveRef.current && qrRequest.current === sequence) setBusy('');
+    }
+  }, [qr, stopPoll]);
+
   const submitSms = useCallback(async () => {
     const code = smsCode.replace(/\D/g, '');
     if (code.length < 4) { setSmsErr('请输入手机收到的验证码'); return; }
@@ -211,7 +243,7 @@ export default function AccountsPage() {
     }
   }, [cred, credForm, runWhoami, closeCred]);
 
-  const handleLogin = useCallback(async (a: AccountItem) => {
+  const handleLogin = useCallback(async (a: AccountItem, manual = false) => {
     if (!a.supported) return;
     if (a.backend === 'wechat-oa') { openCred(a); return; }   // 公众号走凭证表单，不扫码
     const sequence = ++qrRequest.current;
@@ -225,9 +257,11 @@ export default function AccountsPage() {
     qrPlatformRef.current = a.platform;
     setQrNonce((n) => n + 1);
     setQr({ platform: a.platform, name: a.name, state: 'starting',
-            message: '正在启动浏览器并准备二维码…', qr: '' });
+            message: manual && a.platform === 'xiaohongshu' ? '正在打开专用普通 Chrome，请在官网手动登录…'
+              : manual || a.loginWindow ? '正在打开浏览器窗口，请在官网手动登录…'
+              : '正在启动浏览器并准备二维码…', qr: '' });
     try {
-      const res = await startLogin(a.platform);
+      const res = await (manual ? startLogin(a.platform, true) : startLogin(a.platform));
       if (!aliveRef.current || qrRequest.current !== sequence) return;
       if (res.mode === 'terminal') {
         setQr(null);
@@ -411,6 +445,7 @@ export default function AccountsPage() {
           const w = whoami[a.platform];
           const info = w && w !== 'loading' ? w : null;
           const logged = effLoggedIn(a);
+          const dualLogin = a.supported && !a.loginWindow && ['xhs', 'web', 'douyin'].includes(a.backend);
           return (
             <div key={a.platform} className="card account-card" style={{ opacity: a.supported ? 1 : 0.6 }}>
               <div className="account-card-head">
@@ -428,9 +463,26 @@ export default function AccountsPage() {
                 <div className="account-card-note">{a.note ? a.note : `后端：${a.name}`}</div>
               )}
 
-              <div style={{ display: 'flex', gap: 8, marginTop: 'auto' }}>
+              {a.platform === 'xiaohongshu' && (
+                <div className="account-card-note">本机兼容扫码会打开原生专用窗口，请保持窗口开启；普通 Chrome 手动登录是独立方式。</div>
+              )}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 'auto' }}>
+                {dualLogin && (
+                  <button className="btn btn-sm" disabled={busy === a.platform}
+                    onClick={() => handleLogin(a, true)}>
+                    {a.platform === 'xiaohongshu' ? '普通Chrome手动登录' : '窗口手动登录'}
+                  </button>
+                )}
                 {logged ? (
                   <>
+                    {a.supported && a.loginWindow && (
+                      <button className="btn btn-sm" disabled={busy === a.platform}
+                        onClick={() => handleLogin(a)}>窗口手动登录</button>
+                    )}
+                    {dualLogin && (
+                      <button className="btn btn-sm" disabled={busy === a.platform}
+                        onClick={() => handleLogin(a)}>二维码登录</button>
+                    )}
                     <button className="btn btn-sm" style={{ flex: 1 }}
                       disabled={busy === a.platform || busy === a.platform + ':mp' || w === 'loading'}
                       onClick={() => runWhoami(a.platform)}>
@@ -448,7 +500,8 @@ export default function AccountsPage() {
                     className={`btn btn-block ${a.supported ? 'btn-primary' : ''}`}
                     disabled={!a.supported || busy === a.platform || busy === a.platform + ':mp'}
                     onClick={() => (a.backend === 'wechat-oa' ? handleMpLogin(a) : handleLogin(a))}>
-                    {(busy === a.platform || busy === a.platform + ':mp') ? '启动中…' : '登录'}
+                    {(busy === a.platform || busy === a.platform + ':mp') ? '启动中…'
+                      : a.loginWindow ? '窗口手动登录' : dualLogin ? '二维码登录' : '登录'}
                   </button>
                 )}
               </div>
@@ -505,13 +558,19 @@ export default function AccountsPage() {
             ) : qr.state === 'success' ? (
               <div style={{ fontSize: 48, padding: 40 }}>✅</div>
             ) : ['error', 'expired'].includes(qr.state) ? (
-              <div style={{ fontSize: 13, color: 'var(--red)', padding: 30 }}>
-                {qr.message || '登录失败'}<br />请根据上方具体原因排查；可关闭后重试，日志在 outputs/_login/。
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', padding: 24 }}>
+                登录任务异常不代表账号一定未登录。如果官网已经登录，可核验现有登录态，无需重复扫码。<br />
+                排查日志：outputs/_login/。
               </div>
             ) : (
               <div className="loading" style={{ padding: 40 }}><div className="spinner" />准备二维码…</div>
             )}
-            <div style={{ marginTop: 16 }}>
+            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center', gap: 8 }}>
+              {['error', 'expired'].includes(qr.state) && (
+                <button className="btn btn-primary" disabled={busy === qr.platform + ':verify'} onClick={recheckLogin}>
+                  {busy === qr.platform + ':verify' ? '正在核验…' : '已登录？重新核验'}
+                </button>
+              )}
               <button className="btn" onClick={closeQr}>{qr.state === 'success' ? '完成' : '关闭'}</button>
             </div>
           </div>

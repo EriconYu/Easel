@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import EnvBoard from './EnvBoard';
 import HarnessSettings from './HarnessSettings';
+import WorkbenchEngines from './WorkbenchEngines';
 import SettingsSelect, { OptionsDropdown } from './SettingsSelect';
 import type { JobView } from './EnvBoard';
 import {
@@ -763,6 +764,7 @@ export default function SettingsPanel({ onClose, banner = '' }: Props) {
                 {savedNote ? <div className={`save-note${savedNote.startsWith('保存失败') || savedNote.startsWith('没有') ? ' err' : ''}`}>{savedNote}</div> : null}
 
                 {chan === 'chat' && <HarnessSettings onChange={setHarness} onSelect={setSelectedHarness} />}
+                {chan === 'chat' && <section className="st-panel active"><div className="panel-top"><strong>联网搜索（独立于创作模型）</strong></div><WorkbenchEngines /></section>}
                 {chan === 'chat' && (selectedHarness === 'api' || selectedHarness === 'openclaw') && (
                   <section className="st-panel active">
                     <div className="panel-top">

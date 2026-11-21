@@ -162,6 +162,30 @@ def test_web_reuses_native_process_and_resumes_after_cleanup(tmp_path, runtime, 
     asyncio.run(scenario())
 
 
+def test_workbench_codex_enforces_web_policy_and_output_schema(tmp_path):
+    from dataclasses import replace
+    from easel.harnesses.rpc import close_sessions
+    async def reject(_):
+        raise AssertionError('Unexpected permission')
+    async def scenario():
+        request = replace(request_for(tmp_path, 'codex', mode='stable-resume'),
+                          session_key='wb-policy', web_search=False,
+                          output_schema={'type': 'object'})
+        ids = []
+        try:
+            await CodexAdapter().run(request, lambda *_: None, reject, ids.append)
+            await CodexAdapter().run(replace(request, native_id=ids[-1], web_search=True),
+                                     lambda *_: None, reject, ids.append)
+            assert len(set(ids)) == 1
+        finally:
+            await close_sessions('wb-policy')
+    asyncio.run(scenario())
+    messages = audit(tmp_path)
+    threads = [m['params'] for m in messages if m.get('method') in {'thread/start', 'thread/resume'}]
+    assert [m['config']['web_search'] for m in threads] == ['disabled', 'live']
+    assert all(m['params']['outputSchema'] == {'type': 'object'} for m in messages if m.get('method') == 'turn/start')
+
+
 def test_binding_cannot_silently_replace_native_history(tmp_path):
     store.bind(tmp_path, "conversation", "codex", "original")
     with pytest.raises(HarnessError, match="不会替换已有历史"):

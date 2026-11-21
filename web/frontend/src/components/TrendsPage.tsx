@@ -5,9 +5,16 @@ import type { TrendGroup, TrendSource } from '../lib/api';
 import { IconFire, IconRefresh, IconBookmark, IconCheck, IconChat } from './icons';
 import TrendSourcesDialog from './TrendSourcesDialog';
 import ContentPanel from './ContentPanel';
+import WorkbenchPanel from './WorkbenchPanel';
+import { importRadarSource } from '../lib/radar';
+import type { RadarSource } from '../lib/radar';
+import type { Page } from './Sidebar';
+import './TrendsPage.css';
 
 interface TrendsPageProps {
-  onUseTopic: (title: string) => void;   // 一键做成内容 → 跳 chat
+  persona: string;
+  onOpenProject: (taskId: string) => Promise<void>;
+  onNavigate: (page: Page) => void;
 }
 
 class TrendBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -19,10 +26,43 @@ class TrendBoundary extends Component<{ children: ReactNode }, { failed: boolean
 }
 
 export default function TrendsPage(props: TrendsPageProps) {
-  return <TrendBoundary><TrendsPanel {...props} /></TrendBoundary>;
+  return <TrendBoundary><RadarPanel {...props} /></TrendBoundary>;
 }
 
-function TrendsPanel({ onUseTopic }: TrendsPageProps) {
+function RadarPanel(props: TrendsPageProps) {
+  const [view, setView] = useState<'persona' | 'raw'>('persona');
+  const [error, setError] = useState('');
+  const [importing, setImporting] = useState(false);
+  const importSource = async (source: RadarSource) => {
+    if (!props.persona || importing) return;
+    setImporting(true); setError('');
+    try {
+      const task = await importRadarSource(props.persona, source);
+      await props.onOpenProject(task.task_id);
+    } catch (e) { setError(e instanceof Error ? e.message : '导入失败'); }
+    finally { setImporting(false); }
+  };
+  return <div className="page-scroll trends-page">
+    <div className="page-head"><div><h1 className="page-title"><IconFire size={22} /> 热点雷达</h1>
+      <p className="page-subtitle">查找来源与筛选选题；确定后进入同一个内容项目，统一讨论、依据与稿件。</p>
+      <p className="page-subtitle">{props.persona ? `当前画像：${props.persona}` : '当前未选择画像：请先选择画像，再进行个性化选题。'}</p>
+    </div>{!props.persona && <button className="btn" onClick={() => props.onNavigate('profile')}>选择画像</button>}</div>
+    <div className="trend-platforms" role="group" aria-label="热点雷达视图">
+      <button className={`chip ${view === 'persona' ? 'active' : ''}`} aria-pressed={view === 'persona'} onClick={() => setView('persona')}>画像选题 / 搜索</button>
+      <button className={`chip ${view === 'raw' ? 'active' : ''}`} aria-pressed={view === 'raw'} onClick={() => setView('raw')}>全网原始热榜</button>
+    </div>
+    {error && <p className="notice-error" role="alert">{error}</p>}
+    {view === 'persona' ? <>
+      <p className="workbench-muted">搜索词使用今日意愿，画像用于规则匹配及后续 AI 分析，不会把整份画像上传给搜索。点击按钮才开始搜索或模型调用；没有相关热点不凑数。下方显示已保存的意愿与筛选条件。</p>
+      <WorkbenchPanel key={props.persona} persona={props.persona} onOpenProject={props.onOpenProject} />
+    </> : <>
+      <p className="workbench-muted">全网原始热榜：按来源采集和原榜顺序展示，非 AI 推荐，不代表与当前画像相关。导入只保存线索，不会自动调用模型。</p>
+      <TrendsPanel persona={props.persona} importing={importing} onImportSource={importSource} />
+    </>}
+  </div>;
+}
+
+function TrendsPanel({ persona, importing, onImportSource }: {persona: string; importing: boolean; onImportSource: (source: RadarSource) => Promise<void>}) {
   const [sources, setSources] = useState<TrendSource[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [ready, setReady] = useState(false);
@@ -98,12 +138,12 @@ function TrendsPanel({ onUseTopic }: TrendsPageProps) {
     setSelected((prev) => prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]);
 
   return (
-    <div className="page-scroll trends-page" aria-busy={loading}>
+    <div className="raw-trends-panel" aria-busy={loading}>
       <div className="page-head">
         <div>
-          <h1 className="page-title"><IconFire size={22} /> 热点雷达</h1>
+          <h2 className="page-title">全网原始热榜</h2>
           <p className="page-subtitle">
-            汇集平台热搜与自定义数据源，挑选题，一键交给 AI 做成你的内容。
+            选择数据源查看原始线索；导入后进入内容项目核验、讨论和创作，不会自动调用模型。
             {updated > 0 && <span style={{ color: 'var(--text-tertiary)' }}> · {new Date(updated * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 查询</span>}
           </p>
         </div>
@@ -156,8 +196,11 @@ function TrendsPanel({ onUseTopic }: TrendsPageProps) {
                       onClick={() => save(`${g.platform}:${it.id}`, it.title, g.label)}>
                       {saved.has(`${g.platform}:${it.id}`) ? <IconCheck size={14} /> : <IconBookmark size={14} />}
                     </button>
-                    <button className="trend-use" title="做成内容" aria-label={`做成内容：${it.title}`}
-                      onClick={() => onUseTopic(it.title)}><IconChat size={14} /></button>
+                    <button className="trend-use" title={persona ? '保存原始来源并进入内容项目，不自动调用模型' : '请先选择画像'} aria-label={`进入内容项目：${it.title}`}
+                      disabled={!persona || importing}
+                      onClick={() => onImportSource({id: it.id, title: it.title, url: it.url,
+                        platform: g.platform, label: g.label, published_at: it.published_at,
+                        fetched_at: g.fetched_at, hot: it.hot})}><IconChat size={14} /><span>进入内容项目</span></button>
                   </div>
                 </div>
               ))}

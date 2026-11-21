@@ -12,6 +12,19 @@ from .rpc import connection
 from .workspace import harness_instructions
 
 
+def output_write_roots(cwd):
+    """Keep writes scoped to the workspace and its configured content store."""
+    root = cwd.resolve()
+    roots = [str(root)]
+    output = root / "outputs"
+    if output.is_dir():
+        target = output.resolve()
+        # Never turn an accidental link to /, home, or another ancestor into a grant.
+        if target != root and target not in root.parents and root not in target.parents:
+            roots.append(str(target))
+    return roots
+
+
 class CodexAdapter:
     descriptor = Descriptor("codex", "Codex", "app-server", "npm install -g @openai/codex；codex login")
 
@@ -99,12 +112,14 @@ class CodexAdapter:
                     "clientInfo": {"name": "easel", "version": __version__},
                     "capabilities": {"experimentalApi": True}})
                 await rpc.send({"method": "initialized"})
-            options = {"cwd": str(request.cwd), "approvalPolicy": "on-request",
+            options: dict = {"cwd": str(request.cwd), "approvalPolicy": "on-request",
                        "sandbox": request.sandbox,
                        "developerInstructions": harness_instructions(request)}
+            if request.web_search is not None:
+                options['config'] = {'web_search': 'live' if request.web_search else 'disabled'}
             if request.model:
                 options["model"] = request.model
-            if thread_id and rpc.native_id == thread_id:
+            if thread_id and rpc.native_id == thread_id and request.web_search is None:
                 result = {"thread": {"id": thread_id}}
             elif thread_id:
                 result = await rpc.call("thread/resume", {**options, "threadId": thread_id})
@@ -119,10 +134,12 @@ class CodexAdapter:
             bind(thread_id)
             rpc.native_id = thread_id
             policy = {"type": "readOnly"} if request.sandbox == "read-only" else {
-                "type": "workspaceWrite", "writableRoots": [str(request.cwd)],
+                "type": "workspaceWrite", "writableRoots": output_write_roots(request.cwd),
                 "networkAccess": False}
             params = {"threadId": thread_id, "input": [{"type": "text", "text": request.prompt}],
                       "approvalPolicy": "on-request", "sandboxPolicy": policy}
+            if request.output_schema is not None:
+                params['outputSchema'] = request.output_schema
             if request.model:
                 params["model"] = request.model
             early: list[tuple[str, dict]] = []

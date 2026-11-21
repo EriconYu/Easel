@@ -14,7 +14,8 @@ const EVENT_TYPES = ['节日', '电商', '平台活动', '行业'];
 const SOURCE_LABEL: Record<string, string> = {
   chat: '对话页', 'publish-page': '发布页', manual: '手动', scheduler: '排期',
 };
-const PLATFORMS = ['小红书', '抖音', 'B站', '微信视频号', '快手', '公众号', '微博', '知乎', '今日头条'];
+import { SCHEDULE_PLATFORMS, platformNotice } from '../lib/platformCapabilities';
+const PLATFORMS = SCHEDULE_PLATFORMS;
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
 type Filter = 'all' | 'content' | 'event';
 
@@ -28,7 +29,11 @@ const EMPTY: ScheduleInput = {
   kind: 'content', url: '', source: 'manual', event_type: '', end_date: '',
 };
 
-export default function CalendarPage() {
+interface Props {
+  onOpenProject?: (persona: string, taskId: string) => Promise<void>;
+}
+
+export default function CalendarPage({ onOpenProject }: Props) {
   const today = useMemo(() => new Date(), []);
   const [cursor, setCursor] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
   const [items, setItems] = useState<ScheduleItem[]>([]);
@@ -39,6 +44,8 @@ export default function CalendarPage() {
   const [ctx, setCtx] = useState<ScheduleContext | null>(null);
   const [showSuggest, setShowSuggest] = useState(true);
   const [dayView, setDayView] = useState<string | null>(null);   // 展开查看某天全部（date，null=关闭）
+  const [projectError, setProjectError] = useState('');
+  const [openingProject, setOpeningProject] = useState(false);
 
   const load = useCallback(() => {
     fetchSchedule().then(setItems).catch(() => {});
@@ -71,11 +78,12 @@ export default function CalendarPage() {
   }, [cursor]);
 
   const openNew = (date: string) => {
+    setProjectError('');
     setDayView(null);
     setEditing(null);
     setForm({ ...EMPTY, date, kind: filter === 'event' ? 'event' : 'content' });
   };
-  const openEdit = (it: ScheduleItem) => { setDayView(null); setEditing(it); setForm({ ...EMPTY, ...it }); };
+  const openEdit = (it: ScheduleItem) => { setProjectError(''); setDayView(null); setEditing(it); setForm({ ...EMPTY, ...it }); };
   const close = () => { setForm(null); setEditing(null); };
 
   // 单条 chip（活动=色条，内容=按状态上色的圆点），日历格与当天详情共用
@@ -97,6 +105,7 @@ export default function CalendarPage() {
         onClick={(e) => { e.stopPropagation(); openEdit(it); }}>
         <span className="cal-event-dot" />
         <span className="cal-event-title">{it.platform ? `[${it.platform}] ` : ''}{it.title}</span>
+        {it.persona && it.task_id && <span className="cal-src">关联内容项目</span>}
         {it.status === 'published' && it.source && SOURCE_LABEL[it.source]
           && <span className="cal-src">{SOURCE_LABEL[it.source]}</span>}
       </div>
@@ -122,6 +131,14 @@ export default function CalendarPage() {
   const shift = (n: number) => setCursor((c) => new Date(c.getFullYear(), c.getMonth() + n, 1));
   const todayStr = ymd(today);
   const isEvent = form?.kind === 'event';
+  const linkedForm = !isEvent && !!form?.persona && !!form?.task_id;
+  const openProject = async () => {
+    if (!linkedForm || !form?.persona || !form?.task_id || !onOpenProject) return;
+    setProjectError(''); setOpeningProject(true);
+    try { await onOpenProject(form.persona, form.task_id); }
+    catch (error) { setProjectError(error instanceof Error ? error.message : '无法打开内容项目'); }
+    finally { setOpeningProject(false); }
+  };
   const suggestions = ctx?.suggestions || [];
 
   return (
@@ -228,8 +245,18 @@ export default function CalendarPage() {
               <button className={`chip ${!isEvent ? 'active' : ''}`}
                 onClick={() => setForm({ ...form, kind: 'content' })}>内容 / 发布</button>
               <button className={`chip ${isEvent ? 'active' : ''}`}
+                disabled={linkedForm}
                 onClick={() => setForm({ ...form, kind: 'event', status: 'idea' })}>平台活动</button>
             </div>
+            {linkedForm && (
+              <div style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
+                <div className="field-label">关联内容项目</div>
+                <div>{form.persona} · {form.task_id}</div>
+                <div>版本：{form.version_id || '未指定版本'}</div>
+                {onOpenProject && <button className="btn btn-sm" disabled={openingProject} onClick={openProject}>回到项目</button>}
+                {projectError && <div role="alert">{projectError}</div>}
+              </div>
+            )}
             <label className="field-label">标题 *</label>
             <input className="field" value={form.title} autoFocus placeholder={isEvent ? '活动/节点名称' : '要发什么内容'}
               onChange={(e) => setForm({ ...form, title: e.target.value })} />
@@ -273,6 +300,7 @@ export default function CalendarPage() {
             ) : (
               <>
                 <label className="field-label">平台</label>
+                {platformNotice(form.platform || '') && <p className="pv-hint" role="note">{platformNotice(form.platform || '')}</p>}
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
                   {PLATFORMS.map((p) => (
                     <button key={p} className={`chip ${form.platform === p ? 'active' : ''}`}

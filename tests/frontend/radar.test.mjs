@@ -1,0 +1,43 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {createRequire} from 'node:module';
+import {runInNewContext} from 'node:vm';
+const require=createRequire(new URL('../../web/frontend/package.json',import.meta.url));
+const ts=require('typescript');
+const read=path=>readFileSync(new URL('../../web/frontend/src/'+path,import.meta.url),'utf8');
+const walk=(x)=>Array.isArray(x)?x.flatMap(walk):x&&typeof x==='object'?[x,...walk(x.props?.children)]:[];
+test('热点雷达独立导航且App传入同一画像和生成会话回调',()=>{
+ assert.match(read('components/Sidebar.tsx'),/page: 'trends', Icon: IconFire, label: '热点雷达'/);
+ const app=read('App.tsx');
+ assert.match(app,/case 'trends':[\s\S]*?<TrendsPage[\s\S]*?persona=\{selectedPersona\}[\s\S]*?onOpenProject=\{handleOpenProject\}/);
+});
+test('默认画像选题视图复用工作台，原始热榜须明确切换',()=>{
+ const source=read('components/TrendsPage.tsx').replace('function RadarPanel(', 'export function RadarPanel(');
+ let values=[],cursor=0;
+ const react={Component:class{},useState:init=>{const i=cursor++;if(!(i in values))values[i]=init;return [values[i],v=>values[i]=typeof v==='function'?v(values[i]):v];}};
+ const jsx={jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})};
+ const exports={};
+ runInNewContext(ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX}}).outputText,{exports,require:n=>n==='react'?react:n==='react/jsx-runtime'?jsx:n==='./WorkbenchPanel'?{__esModule:true,default:'workbench'}:{}});
+ const props={persona:'科技科普',onGenerateWorkbench:()=>{},onContinueWorkbench:()=>{},onNavigate:()=>{}};
+ const render=()=>{cursor=0;return walk(exports.RadarPanel(props));};
+ let nodes=render();
+ assert.equal(nodes.find(n=>n.type==='workbench').props.persona,'科技科普');
+ assert.ok(nodes.some(n=>n.props?.children==='当前画像：科技科普'));
+ nodes.find(n=>n.props?.children==='全网原始热榜').props.onClick();
+ nodes=render();assert.ok(!nodes.some(n=>n.type==='workbench'));
+ assert.ok(nodes.some(n=>typeof n.props?.children==='string'&&n.props.children.includes('非 AI')));
+ values=[];cursor=0;
+ const empty=walk(exports.RadarPanel({...props,persona:''}));
+ assert.ok(empty.some(n=>n.props?.children==='选择画像'));
+ assert.equal(empty.find(n=>n.type==='workbench').props.persona,'');
+});
+test('来源导入API发送完整证据且服务端失败可重试',async()=>{
+ const exports={};let calls=[];
+ runInNewContext(ts.transpileModule(read('lib/radar.ts'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports,fetch:async(url,options)=>{calls.push([url,options]);return {ok:calls.length>1,status:400,json:async()=>calls.length>1?{task_id:'persisted'}:{detail:'来源有误'}};}});
+ const source={id:'1',title:'完整标题',url:'https://example.com',platform:'news',label:'新闻',published_at:'原始日期',fetched_at:'采集时间',hot:'10万'};
+ await assert.rejects(exports.importRadarSource('画像甲',source),/来源有误/);
+ assert.equal((await exports.importRadarSource('画像甲',source)).task_id,'persisted');
+ assert.deepEqual(JSON.parse(calls[1][1].body),{persona:'画像甲',source});
+ assert.equal(calls[1][0],'/api/workbench/import-source');
+});

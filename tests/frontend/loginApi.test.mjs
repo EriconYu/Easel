@@ -27,3 +27,12 @@ for (const platform of ['zhihu', 'xiaohongshu', 'weixin-channels']) {
     assert.equal(calls[0].options.method, 'POST');
   });
 }
+
+test('manual Chrome login is explicitly routed through the API', async () => {
+  const calls = [];
+  const exports = {};
+  runInNewContext(outputText, { exports, encodeURIComponent,
+    request: async path => { calls.push(path); return { state: 'starting' }; } });
+  await exports.startLogin('xiaohongshu', true);
+  assert.equal(calls[0], '/api/login/xiaohongshu?restart=true&manual=true');
+});

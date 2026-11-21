@@ -1,39 +1,26 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  createSchedule, executeSkill, runAgent, streamChat,
+  savePublishSchedule, executeSkill, runAgent, streamChat,
   fetchAccounts, publishNow, publishStatus, submitPublishSms, fetchOutputs, mediaUrl,
 } from '../lib/api';
 import type { AccountItem, OutputFile } from '../lib/api';
-import { loadPublishDraft, savePublishDraft } from '../lib/store';
+import { loadPublishDraft, savePublishDraft, createPublishSnapshot, recoverableLegacyPublishDraft, restoreLegacyPublishDraft } from '../lib/store';
+import ProjectPublishSource from './ProjectPublishSource';
+import type { ProjectPublishDraft } from './ProjectPublishSource';
 import { renderMarkdown } from '../lib/sanitize';
 import { IconPublish, IconCopy, IconCheck, IconCalendar, IconSkills, IconEdit, IconStop, IconTrash } from './icons';
 
 interface PublishPageProps {
   persona: string;
+  projectDraft?: ProjectPublishDraft;
 }
 
-// 平台列表须与后端 LOGIN_RUNNERS 对齐（有登录/发布链路的才列）
-// draft: true = 该平台支持「存草稿」（落后台草稿箱，不公开发布）
-const PLATFORMS: { key: string; label: string; titleLimit?: number; bodyLimit: number; hint: string; draft?: boolean }[] = [
-  { key: 'xiaohongshu', label: '小红书', titleLimit: 20, bodyLimit: 1000, hint: '标题≤20，正文≤1000，重情绪+话题标签' },
-  { key: 'douyin', label: '抖音', titleLimit: 55, bodyLimit: 55, hint: '文案≤55，前几字是钩子' },
-  { key: 'kuaishou', label: '快手', titleLimit: 30, bodyLimit: 1000, hint: '视频或图片(图文)，标题≤30，需附媒体' },
-  { key: 'weixin-channels', label: '视频号', bodyLimit: 1000, hint: '需附视频，短描述+话题标签，微信扫码登录' },
-  { key: 'zhihu', label: '知乎', bodyLimit: 5000, hint: '长文/回答，讲清逻辑' },
-  { key: 'juejin', label: '掘金', titleLimit: 100, bodyLimit: 20000, hint: '技术文章（Markdown），标题≤100；发布默认分类，标签需掘金已有标签' },
-  { key: 'bilibili', label: 'B站', titleLimit: 80, bodyLimit: 2000, hint: '需附视频，标题≤80、简介≤2000，默认投「知识」分区' },
-  { key: 'toutiao', label: '今日头条', titleLimit: 30, bodyLimit: 10000, draft: true, hint: '图文长文，标题≤30 字，话题≤5 个；附件图片插进正文，可存草稿' },
-  { key: 'wechat-oa', label: '公众号', titleLimit: 64, bodyLimit: 20000, hint: '图文文章，正文用 Markdown，首图作封面，发到草稿箱；需先在账号页「登录公众号后台」扫码' },
-  { key: 'twitter-x', label: '推特 X', bodyLimit: 280, hint: '标题与正文合并，最终长度以 X 校验为准；可附 1 图或 1 视频；窗口登录需要运行 Easel 的电脑有图形桌面及外网连接' },
-];
-const LABEL2KEY = Object.fromEntries(PLATFORMS.map((p) => [p.label, p.key]));
-
-// 能一键发布的平台（有后端 publisher）
-const PUBLISHABLE = new Set(['xiaohongshu', 'douyin', 'kuaishou', 'weixin-channels', 'zhihu', 'juejin', 'bilibili', 'wechat-oa', 'twitter-x', 'toutiao']);
-// 必须附带媒体的平台（无媒体发不了）——公众号需要一张封面图，也计入；X 纯文字推文合法，不计入
-const MEDIA_REQUIRED = new Set(['xiaohongshu', 'douyin', 'kuaishou', 'weixin-channels', 'bilibili', 'wechat-oa']);
-// 只能发视频的平台（抖音/视频号/B站：图文不走此链路，必须视频）
-const VIDEO_ONLY = new Set(['douyin', 'weixin-channels', 'bilibili']);
+import { AUTOMATED_PLATFORMS, SCHEDULE_PLATFORMS, platformCapability, platformNotice } from '../lib/platformCapabilities';
+const PLATFORMS = AUTOMATED_PLATFORMS;
+const LABEL2KEY = Object.fromEntries(PLATFORMS.flatMap(p => [p.label, ...p.aliases].map(label => [label, p.key])));
+const PUBLISHABLE = new Set(PLATFORMS.map(p => p.key));
+const MEDIA_REQUIRED = new Set(PLATFORMS.filter(p => p.mediaRequired).map(p => p.key));
+const VIDEO_ONLY = new Set(PLATFORMS.filter(p => p.videoOnly).map(p => p.key));
 const VIDEO_RE = /\.(mp4|mov|webm|mkv|avi|m4v|flv|ts)$/i;
 
 function parseSections(text: string): Record<string, string> {
@@ -45,8 +32,13 @@ function parseSections(text: string): Record<string, string> {
 
 type PubState = { status: 'publishing' | 'ok' | 'fail'; msg: string };
 
-export default function PublishPage({ persona }: PublishPageProps) {
-  const draft0 = loadPublishDraft();
+export default function PublishPage(props: PublishPageProps) {
+  return <PersonaPublishPage key={props.persona} {...props} />;
+}
+
+function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
+  const draft0 = useRef(loadPublishDraft(persona)).current;
+  const [projectSource, setProjectSource] = useState(draft0.project_source);
   const [title, setTitle] = useState(draft0.title);
   const [body, setBody] = useState(draft0.body);
   const [platforms, setPlatforms] = useState<string[]>(draft0.platforms);
@@ -54,6 +46,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
   const [tags, setTags] = useState(draft0.tags || '');
   // 存草稿模式：只对声明了 draft 能力的平台（今日头条）生效，其余平台仍真发布
   const [asDraft, setAsDraft] = useState(false);
+  // 公众号调用链仍由后端决定；这里仅明确展示其草稿箱结果。
   const [editing, setEditing] = useState<string | null>(null);
   const [copied, setCopied] = useState('');
   const [toast, setToast] = useState('');
@@ -61,6 +54,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState('');
   const adaptCtl = useRef<AbortController | null>(null);
+  const adaptRevision = useRef(0);
   // 异步发布轮询的 interval 集合：离开页面统一清掉，否则最长还会继续转 15 分钟
   const pollTimers = useRef<Set<ReturnType<typeof setInterval>>>(new Set());
   const aliveRef = useRef(true);
@@ -70,6 +64,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
   const [mediaFiles, setMediaFiles] = useState<OutputFile[]>([]);
   const [selectedMedia, setSelectedMedia] = useState<string[]>([]);
   const [showPicker, setShowPicker] = useState(false);
+  const [schedulePlatform, setSchedulePlatform] = useState('');
   const [pub, setPub] = useState<Record<string, PubState>>({});
   const [publishing, setPublishing] = useState(false);
   // 发布时的短信验证窗口（抖音风控条件触发；没触发就不弹）
@@ -79,12 +74,13 @@ export default function PublishPage({ persona }: PublishPageProps) {
 
   // 草稿持久化：任何改动即写 localStorage，切页/刷新回来都在
   useEffect(() => {
-    savePublishDraft({ title, body, platforms, overrides, tags });
-  }, [title, body, platforms, overrides, tags]);
+    savePublishDraft({ title, body, platforms, overrides, tags, project_source:projectSource }, persona);
+  }, [persona, title, body, platforms, overrides, tags, projectSource]);
 
   const cleanupPublishActivity = useCallback(() => {
     // 卸载：中止流 + 停掉所有发布状态轮询（否则在后台空转最长 15 分钟）
     aliveRef.current = false;
+    ++adaptRevision.current;
     adaptCtl.current?.abort();
     pollTimers.current.forEach((iv) => clearInterval(iv));
     pollTimers.current.clear();
@@ -144,11 +140,14 @@ export default function PublishPage({ persona }: PublishPageProps) {
       `\n\n原始内容：\n标题：${title}\n正文：${body}`;
 
     setAdapting(true);
+    const requestRevision = ++adaptRevision.current;
+    const isCurrent = () => aliveRef.current && adaptRevision.current === requestRevision;
     let acc = '';
     const base = { ...overrides };
     adaptCtl.current = streamChat(
       prompt, persona, `adapt-${Date.now()}`,
       (chunk) => {                       // 逐字：实时解析并流进对应平台卡片
+        if (!isCurrent()) return;
         acc += chunk;
         const map = parseSections(acc);
         const next = { ...base };
@@ -159,106 +158,103 @@ export default function PublishPage({ persona }: PublishPageProps) {
         setOverrides(next);
       },
       () => {                            // 完成
+        if (!isCurrent()) return;
+        ++adaptRevision.current;
         const hit = Object.keys(parseSections(acc)).length;
         setAdapting(false);
         showToast(hit ? `已生成 ${hit} 个平台版本` : '未能解析，可重试');
       },
-      () => { setAdapting(false); showToast('改写失败，请重试'); },
+      () => { if (!isCurrent()) return; ++adaptRevision.current; setAdapting(false); showToast('改写失败，请重试'); },
     );
   };
-  const stopAdapt = () => { adaptCtl.current?.abort(); setAdapting(false); };
-
-  const performPrecheck = async () => {
-    const prompt =
-      `你是社媒发布审核助手。针对下面这条待发内容做两项检查，用简洁中文分点输出：\n` +
-      `1. **合规风险**：是否含极限词/医疗功效/敏感或违规表述，列出问题词+替换建议；无则写"未见明显风险"。\n` +
-      `2. **标题/钩子**：给标题打 1-10 分，并给 1-2 个更好的备选。\n` +
-      `最后一行给「✅可发 / ⚠️建议修改」结论。\n\n待检内容：\n标题：${title}\n正文：${body}`;
-    const content = `待发布内容：\n标题：${title}\n正文：${body}`;
-    const [general, personaResult] = await Promise.all([
-      runAgent(prompt),
-      persona ? executeSkill('persona-check', content, persona) : Promise.resolve(null),
-    ]);
-    return `${general.response}\n\n---\n\n## 人设一致性\n\n${personaResult?.response || '未选择画像，已跳过人设一致性检查。'}`;
+  const stopAdapt = () => {
+    // Invalidate before abort: an already queued chunk may still be delivered.
+    ++adaptRevision.current;
+    adaptCtl.current?.abort(); adaptCtl.current = null; setAdapting(false);
   };
 
-  // C. 发布前一键预检
+  const capture = (targets = PLATFORMS.filter(p => platforms.includes(p.key))) => createPublishSnapshot(
+    { title, body, platforms, overrides, tags, project_source: projectSource }, persona, selectedMedia, asDraft, targets);
+  const revision = JSON.stringify(capture());
+  const currentRevision = useRef(revision);
+  currentRevision.current = revision;
+  const publishLock = useRef(false);
+  useEffect(() => { setCheckResult(''); }, [revision]);
+
+  const performPrecheck = async (snapshot: ReturnType<typeof createPublishSnapshot>) => {
+    const results = await Promise.all(snapshot.map(async ({ platform, payload }) => {
+      const label = PLATFORMS.find(p => p.key === platform)?.label || platform;
+      const content = `待发平台：${label}\n最终提交载荷（含平台正文、标签、素材路径及画像/来源）：\n${JSON.stringify(payload, null, 2)}`;
+      const [general, consistency] = await Promise.all([
+        runAgent(`仅审核建议，不执行发布或工具。逐项检查最终载荷的合规风险、事实依据、标题钩子及标签，指出问题和替换建议；不能保证平台审核通过。\n${content}`),
+        persona ? executeSkill('persona-check', content, persona) : Promise.resolve(null),
+      ]);
+      return `## ${label}\n\n${general.response}\n\n### 人设一致性\n\n${consistency?.response || '未选择画像，已跳过人设一致性检查。'}`;
+    }));
+    return results.join('\n\n---\n\n');
+  };
+
   const check = async () => {
-    if (empty) return;
+    if (empty || checking || adapting || !platforms.length) return;
+    const snapshot = capture();
+    const reviewedRevision = revision;
     setChecking(true); setCheckResult('');
     try {
-      setCheckResult(await performPrecheck());
+      const result = await performPrecheck(snapshot);
+      if (aliveRef.current && currentRevision.current === reviewedRevision) setCheckResult(result);
     } catch (e) {
-      setCheckResult(e instanceof Error ? e.message : '预检失败');
-    } finally { setChecking(false); }
+      if (aliveRef.current && currentRevision.current === reviewedRevision) setCheckResult(e instanceof Error ? e.message : '预检失败');
+    } finally { if (aliveRef.current) setChecking(false); }
   };
 
-  // D. 一键发布（真发布，二次确认）
+  // Freeze first, review each exact payload, then submit only that same snapshot.
   const publishAll = async () => {
-    if (empty || publishing || checking) return;
-    const targets = PLATFORMS.filter((p) => platforms.includes(p.key) && PUBLISHABLE.has(p.key));
-    if (targets.length === 0) {
-      showToast('所选平台暂不支持一键发布（B站请用「复制」或终端 biliup）');
-      return;
-    }
+    if (projectSource && projectSource.persona !== persona) { showToast('源稿属于另一个画像，请从正确内容项目重新载入'); return; }
+    if (empty || publishing || checking || adapting || publishLock.current) return;
+    const targets = PLATFORMS.filter(p => platforms.includes(p.key) && PUBLISHABLE.has(p.key));
+    if (!targets.length) { showToast('所选平台没有自动发布集成，请选择支持的平台'); return; }
+    const snapshot = capture(targets);
+    const reviewedRevision = revision;
+    publishLock.current = true;
     setChecking(true);
     try {
-      setCheckResult(await performPrecheck());
-    } catch (e) {
-      setCheckResult(`预检失败：${e instanceof Error ? e.message : '未知错误'}\n\n预检仅用于提醒，不会阻止你继续发布。`);
-    } finally {
-      setChecking(false);
-    }
-    // 存草稿只对声明 draft 能力的平台（今日头条）生效；其余平台一律真发布
-    const draftTargets = asDraft ? targets.filter((t) => t.draft) : [];
-    const liveTargets = asDraft ? targets.filter((t) => !t.draft) : targets;
-    const okToSend = window.confirm(
-      `发布前预检已执行，结果已显示在页面中。人设评分只做提醒，不会阻止发布。\n\n` +
-      (draftTargets.length
-        ? `将【存入草稿箱】：${draftTargets.map((t) => t.label).join('、')}（不公开发布）。\n`
-        : '') +
-      (liveTargets.length
-        ? `即将【真实发布】到：${liveTargets.map((t) => t.label).join('、')}。\n` +
-          `这会公开发布到你的账号，确定继续？`
-        : '确认继续？'));
-    if (!okToSend) return;
-
-    setPublishing(true);
-    for (const t of targets) {
-      // 存草稿只对声明 draft 能力的平台生效（今日头条）；其余平台一律真发布
-      const asDraftThis = asDraft && !!t.draft;
-      if (!loginOf(t.key)) {
-        setPub((r) => ({ ...r, [t.key]: { status: 'fail', msg: '未登录 · 去账号页登录' } }));
-        continue;
-      }
-      if (MEDIA_REQUIRED.has(t.key) && selectedMedia.length === 0) {
-        setPub((r) => ({ ...r, [t.key]: { status: 'fail', msg: '需附带图片/视频' } }));
-        continue;
-      }
-      if (VIDEO_ONLY.has(t.key) && !selectedMedia.some((p) => VIDEO_RE.test(p))) {
-        setPub((r) => ({ ...r, [t.key]: { status: 'fail', msg: `${t.label}只能发视频，请从内容库选一个视频` } }));
-        continue;
-      }
-      setPub((r) => ({ ...r, [t.key]: { status: 'publishing', msg: asDraftThis ? '存草稿中…可能需 1-2 分钟' : '发布中…可能需 1-2 分钟' } }));
-      try {
-        const res = await publishNow(t.key, { title, body: effective(t.key), media: selectedMedia, tags, persona, draft: asDraftThis });
-        if (res.async) {
-          // 抖音：异步发布，轮询状态；风控触发短信墙时弹输入框（条件触发，没触发就直接跑完）
-          await pollAsyncPublish(t.key, t.label);
-        } else {
-          setPub((r) => ({
-            ...r,
-            [t.key]: res.ok
-              ? { status: 'ok', msg: asDraftThis ? '已存草稿 ✅' : '已发布 ✅' }
-              : { status: 'fail', msg: res.detail || res.message || '发布失败' },
-          }));
+      let result: string;
+      try { result = await performPrecheck(snapshot); }
+      catch (e) { result = `预检失败：${e instanceof Error ? e.message : '未知错误'}\n\n本次未获得完整审核建议；是否继续由你决定。`; }
+      if (!aliveRef.current) return;
+      if (currentRevision.current !== reviewedRevision) { showToast('预检期间稿件已改变，请重新预检和确认'); return; }
+      setCheckResult(result); setChecking(false);
+      const labels = snapshot.map(item => {
+        const label = PLATFORMS.find(p => p.key === item.platform)?.label || item.platform;
+        return `${label}：${item.payload.draft || item.platform === 'wechat-oa' ? '送入平台草稿箱' : '真实公开发布'}`;
+      });
+      if (!window.confirm(`已逐平台审核冻结的最终载荷。审核建议仅供参考，不保证合规。\n\n${labels.join('\n')}\n\n确认提交这份已审核快照？`)) return;
+      if (!aliveRef.current || currentRevision.current !== reviewedRevision) return;
+      setPublishing(true);
+      for (const { platform: key, payload } of snapshot) {
+        if (!aliveRef.current) return;
+        const t = targets.find(p => p.key === key)!;
+        if (!loginOf(key)) { setPub(r => ({ ...r, [key]: { status: 'fail', msg: '未登录 · 去账号页登录' } })); continue; }
+        if (MEDIA_REQUIRED.has(key) && !payload.media.length) { setPub(r => ({ ...r, [key]: { status: 'fail', msg: '需附带图片/视频' } })); continue; }
+        if (VIDEO_ONLY.has(key) && !payload.media.some(p => VIDEO_RE.test(p))) { setPub(r => ({ ...r, [key]: { status: 'fail', msg: `${t.label}只能发视频，请从内容库选一个视频` } })); continue; }
+        setPub(r => ({ ...r, [key]: { status: 'publishing', msg: payload.draft ? '存草稿中…可能需 1-2 分钟' : '发布中…可能需 1-2 分钟' } }));
+        try {
+          const res = await publishNow(key, payload);
+          if (!aliveRef.current) return;
+          if (res.async) await pollAsyncPublish(key, t.label);
+          else setPub(r => ({ ...r, [key]: res.ok
+            ? { status: 'ok', msg: res.message || (key === 'wechat-oa' ? '草稿创建成功，已送入公众号草稿箱 ✅' : payload.draft ? '已存草稿 ✅' : '已发布 ✅') }
+            : { status: 'fail', msg: res.detail || res.message || '发布失败' } }));
+        } catch (e) {
+          if (!aliveRef.current) return;
+          setPub(r => ({ ...r, [key]: { status: 'fail', msg: e instanceof Error ? e.message : '发布失败' } }));
         }
-      } catch (e) {
-        setPub((r) => ({ ...r, [t.key]: { status: 'fail', msg: e instanceof Error ? e.message : '发布失败' } }));
       }
+      if (aliveRef.current) showToast('发布流程结束，见各平台卡片状态');
+    } finally {
+      publishLock.current = false;
+      if (aliveRef.current) { setChecking(false); setPublishing(false); }
     }
-    setPublishing(false);
-    showToast('发布流程结束，见各平台卡片状态');
   };
 
   // 异步发布轮询（抖音）：直到 success/error；遇 sms_required/verifying 弹短信窗口
@@ -278,7 +274,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
         setPub((r) => ({ ...r, [key]: { status: 'publishing', msg: s.message || '需短信验证' } }));
       } else if (s.state === 'success') {
         clearInterval(iv); pollTimers.current.delete(iv); setPubSms(null);
-        setPub((r) => ({ ...r, [key]: { status: 'ok', msg: '已发布 ✅' } }));
+        setPub((r) => ({ ...r, [key]: { status: 'ok', msg: s.message || (key === 'wechat-oa' ? '草稿创建成功，已送入公众号草稿箱 ✅' : '已发布 ✅') } }));
         resolve();
       } else if (s.state === 'error') {
         clearInterval(iv); pollTimers.current.delete(iv); setPubSms(null);
@@ -317,13 +313,25 @@ export default function PublishPage({ persona }: PublishPageProps) {
     // 用本地日期（日历页按本地渲染）：toISOString 是 UTC，东八区 0-8 点会落到「昨天」
     const d = new Date();
     const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    await createSchedule({
+    await savePublishSchedule({
       title: title.trim() || effective(key).slice(0, 20), date,
-      platform: PLATFORMS.find((p) => p.key === key)?.label || '', time: '', status: 'draft', note: effective(key),
+      platform: platformCapability(key)?.label || '', time: '', status: 'draft', note: effective(key),
+      ...projectSource,
     });
     showToast('已存为草稿并加入今天的日历');
   };
 
+  const legacyDraft = recoverableLegacyPublishDraft(persona);
+  const restoreLegacy = () => {
+    if (adapting || checking || publishing || !persona) return;
+    if (!window.confirm(`将旧版草稿明确归入画像「${persona}」并替换当前画像的发布草稿。当前已有内容也会被覆盖；人工审核与平台状态将清空。确认恢复？`)) return;
+    const d = restoreLegacyPublishDraft(persona);
+    if (!d) { showToast('旧版草稿无法恢复，可能属于其他画像或浏览器存储已满'); return; }
+    stopAdapt();
+    setTitle(d.title); setBody(d.body); setPlatforms(d.platforms); setOverrides(d.overrides); setTags(d.tags);
+    setProjectSource(d.project_source); setSelectedMedia([]); setCheckResult(''); setPub({}); setEditing(null); setAsDraft(false);
+    showToast('旧版草稿已恢复到当前画像，请重新核对并预检');
+  };
   const canPublish = platforms.some((k) => PUBLISHABLE.has(k));
   // 已选平台里支持存草稿的（目前只有今日头条）——没有就不显示开关，避免误导
   const draftCapable = PLATFORMS.filter((p) => platforms.includes(p.key) && p.draft);
@@ -332,8 +340,16 @@ export default function PublishPage({ persona }: PublishPageProps) {
     <div className="publish-page">
       <div className="publish-editor">
         <h1 className="page-title"><IconPublish size={21} /> 发布中心</h1>
+        <ProjectPublishSource draft={projectDraft} persona={persona} busy={adapting || checking || publishing} onImport={d=>{
+          stopAdapt();
+          setTitle(d.title);setBody(d.text);setOverrides({});setTags('');setSelectedMedia([]);
+          setCheckResult('');setPub({});setEditing(null);
+          setProjectSource({persona:d.persona,task_id:d.task_id,version_id:d.version_id});
+        }} />
+        {projectSource && <p className="page-subtitle">关联内容项目：{projectSource.task_id} · 源稿版本：{projectSource.version_id}。适配编辑不修改源稿。</p>}
         <p className="page-subtitle">一次编辑 → AI 一键改写成各平台版本 → 预检 → 附媒体 → 一键真发布。</p>
 
+        {legacyDraft && <div className="panel" role="note"><p>{legacyDraft.project_source ? '发现旧版项目草稿，仅可恢复到源画像。' : '旧版草稿未关联画像。'} 不会自动载入；确认恢复会覆盖当前画像的草稿并清空审核。</p><button className="btn btn-sm" disabled={!persona || adapting || checking || publishing} onClick={restoreLegacy}>恢复旧版草稿到当前画像</button></div>}
         <label className="field-label">标题</label>
         <input className="field" value={title} placeholder="标题（部分平台需要）"
           onChange={(e) => setTitle(e.target.value)} />
@@ -392,6 +408,12 @@ export default function PublishPage({ persona }: PublishPageProps) {
           </div>
         )}
 
+        <label className="field-label">排期目标平台
+          <select className="field" aria-label="排期目标平台" value={schedulePlatform} onChange={e => setSchedulePlatform(e.target.value)}>
+            <option value="">请选择排期平台</option>{SCHEDULE_PLATFORMS.map(label => <option key={label} value={label}>{label}</option>)}
+          </select>
+        </label>
+        <p className="pv-hint">排期只保存计划，不执行发布。{platformNotice(schedulePlatform)} 微博尚无发布集成。</p>
         <div className="publish-actions">
           {adapting ? (
             <button className="btn btn-sm" onClick={stopAdapt}><IconStop size={13} /> 停止生成</button>
@@ -403,7 +425,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
           <button className="btn btn-sm" disabled={empty || checking || adapting} onClick={check}>
             <IconCheck size={14} /> {checking ? '预检中…' : '发布前预检'}
           </button>
-          <button className="btn btn-sm" disabled={empty} onClick={() => addToCalendar(platforms[0] || 'xiaohongshu')}>
+          <button className="btn btn-sm" disabled={empty || !schedulePlatform} onClick={() => addToCalendar(platformCapability(schedulePlatform)!.key)}>
             <IconCalendar size={14} /> 存草稿并排期
           </button>
           <button className="btn btn-sm btn-primary" disabled={empty || publishing || checking || !canPublish}
@@ -412,7 +434,7 @@ export default function PublishPage({ persona }: PublishPageProps) {
             <IconPublish size={14} /> {publishing ? '发布中…' : '一键发布'}
           </button>
           <button className="btn btn-sm btn-ghost" disabled={empty || adapting}
-            onClick={() => { setTitle(''); setBody(''); setTags(''); setOverrides({}); setCheckResult(''); setPub({}); showToast('已清空'); }}>
+            onClick={() => { setProjectSource(undefined); setTitle(''); setBody(''); setTags(''); setOverrides({}); setCheckResult(''); setPub({}); showToast('已清空'); }}>
             <IconTrash size={13} /> 清空
           </button>
         </div>

@@ -10,7 +10,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from easel.trends.protocol import MAX_BYTES, utc_now, validate_payload
+from easel.trends.protocol import MAX_BYTES, CollectorError, utc_now, validate_payload
 from easel.timeouts import TIMEOUT_TREND_UPSTREAM
 
 SOURCES: dict[str, tuple[str, str]] = {
@@ -74,9 +74,16 @@ def fetch_json(url: str) -> object:
 def collect_platform(platform: str) -> dict:
     for url in SOURCES[platform]:
         try:
-            items = parse_upstream(fetch_json(url))
+            items = []
+            fetched_at = utc_now()
+            for row in parse_upstream(fetch_json(url)):
+                try:
+                    valid = validate_payload({'version': 1, 'fetched_at': fetched_at, 'items': [row]})
+                except CollectorError:
+                    continue  # One malformed upstream row must not discard the whole feed.
+                items.extend(valid['items'])
             if items:
-                payload = {"version": 1, "fetched_at": utc_now(), "items": items}
+                payload = {"version": 1, "fetched_at": fetched_at, "items": items}
                 validate_payload(payload)
                 return payload
         except Exception:

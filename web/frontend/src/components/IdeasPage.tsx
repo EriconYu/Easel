@@ -1,127 +1,98 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { fetchIdeas, createIdea, updateIdea, deleteIdea, createSchedule } from '../lib/api';
-import type { Idea, IdeaInput } from '../lib/api';
-import { IconIdea, IconEdit, IconTrash, IconChat, IconCalendar, IconChevron } from './icons';
+import {useState, useEffect, useCallback} from 'react';
+import {fetchIdeas, createIdea, updateIdea, developIdea} from '../lib/api';
+import type {Idea, IdeaInput} from '../lib/api';
+import {IconIdea} from './icons';
+import './IdeasPage.css';
 
-interface IdeasPageProps {
-  onUseTopic: (title: string) => void;
+interface Props {
+  persona: string;
+  onOpenProject: (taskId: string) => Promise<void>;
 }
+// These are source-organisation stages, not the project's publication status.
+const STATES = [{key:'pending', label:'灵感收件箱'}, {key:'doing', label:'整理中'}, {key:'done', label:'已整理'}, {key:'archived', label:'已归档'}];
 
-const COLUMNS: { key: string; label: string; color: string }[] = [
-  { key: 'pending', label: '待做', color: 'var(--text-tertiary)' },
-  { key: 'doing', label: '进行中', color: 'var(--layer-attribute)' },
-  { key: 'done', label: '已完成', color: 'var(--layer-publish)' },
-];
-const NEXT: Record<string, string> = { pending: 'doing', doing: 'done', done: 'pending' };
-const EMPTY: IdeaInput = { title: '', note: '', source: '', status: 'pending' };
-
-export default function IdeasPage({ onUseTopic }: IdeasPageProps) {
+export default function IdeasPage({persona, onOpenProject}: Props) {
   const [ideas, setIdeas] = useState<Idea[]>([]);
-  const [form, setForm] = useState<IdeaInput | null>(null);
-  const [editId, setEditId] = useState<string | null>(null);
-  const [toast, setToast] = useState('');
-
-  const load = useCallback(() => { fetchIdeas().then(setIdeas).catch(() => {}); }, []);
-  useEffect(() => { load(); }, [load]);
-
-  const showToast = (m: string) => { setToast(m); setTimeout(() => setToast(''), 2200); };
-  const byStatus = useMemo(() => {
-    const g: Record<string, Idea[]> = { pending: [], doing: [], done: [] };
-    for (const it of ideas) (g[it.status] || g.pending).push(it);
-    return g;
-  }, [ideas]);
-
-  const openNew = () => { setEditId(null); setForm({ ...EMPTY }); };
-  const openEdit = (it: Idea) => { setEditId(it.id); setForm({ title: it.title, note: it.note, source: it.source, status: it.status }); };
-  const save = async () => {
-    if (!form || !form.title.trim()) return;
-    if (editId) await updateIdea(editId, form); else await createIdea(form);
-    setForm(null); setEditId(null); load();
+  const [raw, setRaw] = useState('');
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState('pending');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<Idea|null>(null);
+  const [form, setForm] = useState<IdeaInput>({});
+  const fail = (e: unknown) => setError(e instanceof Error ? e.message : '操作失败，请重试');
+  const load = useCallback(async () => {
+    const list = await fetchIdeas({persona}); setIdeas(list);
+  }, [persona]);
+  useEffect(() => {
+    let alive = true;
+    setIdeas([]); setEditing(null); setError(''); setNotice('');
+    fetchIdeas({persona}).then(list => {if(alive) setIdeas(list);}).catch(e => {if(alive) fail(e);});
+    return () => {alive = false;};
+  }, [persona]);
+  const act = async (work: () => Promise<void>) => {
+    if(busy) return; setBusy(true); setError(''); setNotice('');
+    try {await work();} catch(e) {fail(e);} finally {setBusy(false);}
   };
-  const advance = async (it: Idea) => { await updateIdea(it.id, { ...it, status: NEXT[it.status] }); load(); };
-  const remove = async (it: Idea) => { await deleteIdea(it.id); load(); };
-  const schedule = async (it: Idea) => {
-    // 用本地日期（日历页按本地渲染）：toISOString 是 UTC，东八区 0-8 点会落到「昨天」
-    const d = new Date();
-    const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    await createSchedule({ title: it.title, date, platform: '', time: '', status: 'idea', note: it.note });
-    showToast('已加入日历（今天）');
+  const capture = () => act(async () => {
+    await createIdea({original_text: raw, persona, source:'随手记'});
+    setRaw(''); await load(); setNotice('原话已保存，不需要标题。');
+  });
+  const edit = (idea: Idea) => {
+    setEditing(idea);
+    const {title,note,topic,tags,source,good_performance,priority_reuse,publish_url,review_note} = idea;
+    setForm({title,note,topic,tags,source,good_performance,priority_reuse,publish_url,review_note});
   };
-
-  return (
-    <div className="page-scroll ideas-page">
-      <div className="page-head">
-        <div>
-          <h1 className="page-title"><IconIdea size={21} /> 选题库</h1>
-          <p className="page-subtitle">攒住每一个灵感——从热点收藏或手动新增，推进到「做内容」再进日历。</p>
-        </div>
-        <button className="btn btn-sm btn-primary" onClick={openNew}>+ 新建选题</button>
+  const open = (idea: Idea) => act(async () => {
+    if (!persona) throw new Error('请先选择画像，再进入内容项目。');
+    const existing = idea.developments?.[persona]?.task_id;
+    if (existing) {
+      await onOpenProject(existing);
+      return;
+    }
+    const result = await developIdea(idea.id, persona, '讨论', ['通用'], []);
+    // Keep the newly persisted link even if navigation fails, so retry never resets references.
+    setIdeas(current => current.map(item => item.id === idea.id ? result.idea : item));
+    await onOpenProject(result.task.task_id);
+  });
+  const visible = ideas.filter(i => i.status===status && query.toLocaleLowerCase().split(/\s+/).filter(Boolean).every(q =>
+    [i.title,i.original_text,i.note,i.topic,i.review_note,...(i.tags||[])].join('\n').toLocaleLowerCase().includes(q)));
+  return <div className="page-scroll ideas-page">
+    <div className="page-head"><div><h1 className="page-title"><IconIdea size={21}/> 灵感收件箱</h1>
+      <p className="page-subtitle">保存原话、检索与整理素材；讨论、稿件和版本统一在内容项目中处理。整理阶段不代表发布状态。</p>
+      <p>当前画像：{persona || '未选择（可先保存，进入项目前选择画像）'}</p></div></div>
+    {error && <div className="inbox-error" role="alert">{error}<button className="btn btn-sm" onClick={()=>act(load)}>重试加载</button></div>}
+    {notice && <p role="status">{notice}</p>}
+    <section className="card inbox-capture"><label className="field-label" htmlFor="idea-raw">想到什么就记下来 · 不用起标题</label>
+      <textarea id="idea-raw" className="field" value={raw} onChange={e=>setRaw(e.target.value)} placeholder="零碎的原话、几句好话、还没想清楚的问题……"/>
+      <button className="btn btn-primary" disabled={busy||!raw.trim()} onClick={capture}>保存原话</button></section>
+    <div className="inbox-toolbar"><input aria-label="搜索灵感" className="field" value={query} onChange={e=>setQuery(e.target.value)} placeholder="字面搜索原话 / 备注 / 话题 / 标签"/>
+      {STATES.map(s=><button key={s.key} className={`chip ${status===s.key?'active':''}`} onClick={()=>setStatus(s.key)}>{s.label} {ideas.filter(i=>i.status===s.key).length}</button>)}</div>
+    <div className="inbox-grid">{visible.map(i=><article className="card inbox-card" key={i.id}>
+      <h3>{i.title}</h3><blockquote>{i.original_text}</blockquote>
+      {i.note&&<p className="inbox-note">备注：{i.note}</p>}
+      <p>{[i.topic,...(i.tags||[])].filter(Boolean).join(' · ')}</p>
+      <div className="inbox-tags">{i.good_performance&&<span className="badge">表现好 · 用户标记</span>}{i.priority_reuse&&<span className="badge">重点复用</span>}{!i.persona&&<span className="badge">待选画像</span>}</div>
+      {i.publish_url&&<a href={i.publish_url} target="_blank" rel="noreferrer">查看发布内容</a>}
+      {i.review_note&&<p>复盘：{i.review_note}</p>}
+      <div className="inbox-actions"><button className="btn btn-sm" disabled={busy||!persona} onClick={()=>open(i)}>进入内容项目</button>
+        <button className="btn btn-sm" disabled={busy} onClick={()=>edit(i)}>备注与复盘</button>
+        <button className="btn btn-sm" disabled={busy} onClick={()=>act(async()=>{await updateIdea(i.id,{status:i.status==='archived'?'pending':'archived'});await load();})}>{i.status==='archived'?'移回收件箱':'归档'}</button>
+        <select aria-label="素材整理阶段" value={i.status} disabled={busy} onChange={e=>act(async()=>{await updateIdea(i.id,{status:e.target.value});await load();})}>{STATES.map(s=><option key={s.key} value={s.key}>{s.label}</option>)}</select>
       </div>
-
-      <div className="kanban">
-        {COLUMNS.map((col) => (
-          <div key={col.key} className="kanban-col">
-            <div className="kanban-col-head">
-              <span className="kanban-dot" style={{ background: col.color }} />
-              {col.label}<span className="kanban-count">{byStatus[col.key].length}</span>
-            </div>
-            <div className="kanban-list">
-              {byStatus[col.key].length === 0 && <div className="kanban-empty">拖点选题进来吧</div>}
-              {byStatus[col.key].map((it) => (
-                <div key={it.id} className="card idea-card">
-                  <div className="idea-card-actions">
-                    <button className="session-act" title="编辑" onClick={() => openEdit(it)}><IconEdit size={13} /></button>
-                    <button className="session-act danger" title="删除" onClick={() => remove(it)}><IconTrash size={13} /></button>
-                  </div>
-                  <div className="idea-title">{it.title}</div>
-                  {it.source && <span className="badge" style={{ marginTop: 6 }}>{it.source}</span>}
-                  {it.note && <div className="idea-note">{it.note}</div>}
-                  <div className="idea-foot">
-                    <button className="idea-act" onClick={() => onUseTopic(it.title)}><IconChat size={13} /> 做内容</button>
-                    <button className="idea-act" onClick={() => schedule(it)}><IconCalendar size={13} /> 排期</button>
-                    <button className="idea-act next" onClick={() => advance(it)} title="推进状态">
-                      {COLUMNS.find((c) => c.key === NEXT[it.status])?.label} <IconChevron size={12} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {form && (
-        <div className="overlay" onClick={() => setForm(null)}>
-          <div className="modal" style={{ width: 440, maxWidth: '100%' }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-              <h3 style={{ margin: 0 }}>{editId ? '编辑选题' : '新建选题'}</h3>
-              <button className="icon-btn" onClick={() => setForm(null)}>×</button>
-            </div>
-            <label className="field-label">选题 *</label>
-            <input className="field" value={form.title} autoFocus placeholder="想做的内容 / 角度"
-              onChange={(e) => setForm({ ...form, title: e.target.value })} />
-            <label className="field-label">备注 / 角度</label>
-            <textarea className="field" style={{ minHeight: 70 }} value={form.note}
-              onChange={(e) => setForm({ ...form, note: e.target.value })} />
-            <label className="field-label">来源</label>
-            <input className="field" value={form.source} placeholder="如：微博热搜 / 灵感"
-              onChange={(e) => setForm({ ...form, source: e.target.value })} />
-            <label className="field-label">状态</label>
-            <div style={{ display: 'flex', gap: 7 }}>
-              {COLUMNS.map((c) => (
-                <button key={c.key} className={`chip ${form.status === c.key ? 'active' : ''}`}
-                  onClick={() => setForm({ ...form, status: c.key })}>{c.label}</button>
-              ))}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
-              <button className="btn btn-sm" onClick={() => setForm(null)}>取消</button>
-              <button className="btn btn-sm btn-primary" onClick={save} disabled={!form.title.trim()}>保存</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {toast && <div className="toast ok"><span className="toast-icon">✓</span>{toast}</div>}
-    </div>
-  );
+    </article>)}</div>
+    {!visible.length&&<div className="kanban-empty">{query?'没有字面匹配的灵感':'这里还没有灵感，可以先记几句原话。'}</div>}
+    {editing&&<div className="overlay"><section className="modal inbox-modal" role="dialog" aria-label="备注与复盘">
+      <h3>备注与复盘</h3><blockquote>{editing.original_text}</blockquote><p>原话永久保留，下面只改整理信息。表现好是你的手工判断，不自动认定爆款。</p>
+      {([['title','整理标题（可选）'],['topic','话题'],['source','来源'],['publish_url','发布链接（http/https）']] as const).map(([key,label])=><label className="field-label" key={key}>{label}<input className="field" value={String(form[key]||'')} onChange={e=>setForm({...form,[key]:e.target.value})}/></label>)}
+      <label className="field-label">标签（逗号分隔）<input className="field" value={(form.tags||[]).join(',')} onChange={e=>setForm({...form,tags:e.target.value.split(/[,，]/)})}/></label>
+      <label className="field-label">备注 / 想继续的角度<textarea aria-label="备注 / 想继续的角度" className="field" value={form.note||''} onChange={e=>setForm({...form,note:e.target.value})}/></label>
+      <label className="field-label">复盘备注<textarea aria-label="复盘备注" className="field" value={form.review_note||''} onChange={e=>setForm({...form,review_note:e.target.value})}/></label>
+      <label><input type="checkbox" checked={!!form.good_performance} onChange={e=>setForm({...form,good_performance:e.target.checked})}/>表现好（手工标记）</label>{' '}
+      <label><input type="checkbox" checked={!!form.priority_reuse} onChange={e=>setForm({...form,priority_reuse:e.target.checked})}/>重点复用</label>
+      {error&&<p role="alert" className="inbox-error">{error}</p>}
+      <div className="inbox-actions"><button className="btn" disabled={busy} onClick={()=>setEditing(null)}>取消</button><button className="btn btn-primary" disabled={busy} onClick={()=>act(async()=>{await updateIdea(editing.id,form);await load();setEditing(null);})}>保存整理信息</button></div>
+    </section></div>}
+  </div>;
 }

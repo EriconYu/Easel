@@ -4,7 +4,7 @@ import type { ComponentType } from 'react';
 import {
   IconChat, IconSkills, IconOutputs, IconAccounts, IconProfile,
   IconNewChat, IconEdit, IconArchive, IconUnarchive, IconTrash, IconChevron,
-  IconDashboard,
+  IconDashboard, IconFire, IconIdea,
 } from './icons';
 import { IconGear } from './settingsIcons';
 import ThemeToggle from './ThemeToggle';
@@ -27,9 +27,11 @@ interface SidebarProps {
   onOpenSettings: () => void;
 }
 
-// 主导航（精简）；热点雷达/选题库/内容日历/发布中心 收进「工作台」，不占侧栏
+// 热点雷达、灵感收件箱是独立入口；内容日历和发布中心保留在工作台。
 const NAV: { page: Page; Icon: ComponentType<{ size?: number }>; label: string }[] = [
   { page: 'dashboard', Icon: IconDashboard, label: '工作台' },
+  { page: 'trends', Icon: IconFire, label: '热点雷达' },
+  { page: 'ideas', Icon: IconIdea, label: '灵感收件箱' },
   { page: 'chat', Icon: IconChat, label: '对话' },
   { page: 'skills', Icon: IconSkills, label: '技能库' },
   { page: 'outputs', Icon: IconOutputs, label: '内容库' },

@@ -9,7 +9,7 @@ interface SubNavProps {
 
 const TOOLS: { page: Page; Icon: ComponentType<{ size?: number }>; label: string }[] = [
   { page: 'trends', Icon: IconFire, label: '热点雷达' },
-  { page: 'ideas', Icon: IconIdea, label: '选题库' },
+  { page: 'ideas', Icon: IconIdea, label: '灵感收件箱' },
   { page: 'calendar', Icon: IconCalendar, label: '内容日历' },
   { page: 'publish', Icon: IconPublish, label: '发布中心' },
   { page: 'breakdown', Icon: IconSkills, label: '爆款拆解' },

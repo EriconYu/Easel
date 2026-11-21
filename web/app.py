@@ -1320,14 +1320,56 @@ def get_output_tree() -> list[dict]:
 
 
 def _safe_output_path(rel: str) -> Path:
-    '把相对路径解析到 outputs/ 内，防路径穿越。'
-    full = (OUTPUTS_DIR / rel).resolve()
+    """只开放公开产物；词法路径和解析目标均不得包含内部状态段。"""
     root = OUTPUTS_DIR.resolve()
-    if root != full and root not in full.parents:
+    relative = Path(rel)
+    parts = relative.parts
+    private = (not parts or relative.is_absolute()
+               or any(part.startswith('.') for part in parts)
+               or parts[0].startswith('_')
+               or parts[0].lower() in {'analytics', 'wechat'}
+               or any(part.startswith('_') for part in parts[:-1])
+               or (parts[-1].startswith('_') and relative.suffix.lower() not in IMAGE_EXTS | VIDEO_EXTS | AUDIO_EXTS))
+    if private:
+        raise HTTPException(403, '内部私有路径不可访问')
+    full = (root / relative).resolve()
+    if root == full or root not in full.parents:
         raise HTTPException(403, '非法路径')
+    # Any symlink is rejected below, so the lexical policy cannot be bypassed
+    # by resolving a public alias into a private directory.
+    # 即使链接仍落在 outputs 内，也不能借别名绕过公开/私有边界。
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise HTTPException(403, '产物路径不可包含符号链接')
     if not full.is_file():
         raise HTTPException(404, '文件不存在')
     return full
+
+
+def _delivery_file(directory: Path, filename: str) -> Path:
+    """A typed resource, never a general private-directory download gateway."""
+    if Path(filename).name != filename or '/' in filename or '\\' in filename:
+        raise HTTPException(403, '非法交付文件名')
+    current = directory
+    while current != OUTPUTS_DIR and current != current.parent:
+        if current.is_symlink():
+            raise HTTPException(403, '交付目录不可包含符号链接')
+        current = current.parent
+    target = directory / filename
+    if target.is_symlink():
+        raise HTTPException(403, '交付文件不可为符号链接')
+    if not target.is_file():
+        raise HTTPException(404, '交付文件不存在')
+    return target
+
+
+@app.get('/api/login-qr/{platform}')
+def api_login_qr(platform: str):
+    if platform not in LOGIN_RUNNERS and platform != 'wechat-oa-mp':
+        raise HTTPException(404, '未知登录平台')
+    return FileResponse(_delivery_file(LOGIN_DIR, platform + '.png'), media_type='image/png', headers={'Cache-Control': 'no-store'})
 
 
 @app.get("/")
@@ -1774,13 +1816,7 @@ def _model_channels(runtime: str | None = None) -> dict:
             "result": "已配置" if ok_key else "缺 key",
         })
     def _is_primary(pkey: str, model: str) -> bool:
-        """这一行是不是当前的主模型。
-
-        不能像 openai 行那样只比 provider 前缀：anthropic 与 relay 两个槽位现在都落在
-        同一个 anthropic provider 上（见 _sync_anthropic_provider），只比前缀会让两行
-        同时显示「主」。所以连模型一起比；model 本身可能已是 provider/model 形式
-        （CLAUDE_MODEL 按约定就这么写），两种写法都要认。
-        """
+        """Model candidate only; persisted endpoint selects the unique active slot below."""
         if not primary or not model:
             return False
         return primary == model or primary == f"{pkey}/{model}"
@@ -1841,6 +1877,31 @@ def _model_channels(runtime: str | None = None) -> dict:
     except Exception:  # noqa: BLE001
         pass
     chat_rows.extend(custom_rows)
+
+    if not direct:
+        # Environment slots are alternatives, not independent effective providers.
+        # Resolve their role against the persisted endpoint, then assign it once.
+        active = None
+        try:
+            config = json.loads(_oc_config_path().read_text(encoding='utf-8-sig'))
+            provider = primary.split('/', 1)[0]
+            effective = config.get('models', {}).get('providers', {}).get(provider, {})
+            base = str(effective.get('baseUrl') or ('https://api.anthropic.com' if provider == 'anthropic' else '')).rstrip('/')
+            candidates = []
+            keys = {'anthropic':'ANTHROPIC_API_KEY', 'relay':'EASEL_LLM_API_KEY', 'openai':'OPENAI_API_KEY'}
+            for row in chat_rows:
+                slot_provider = 'anthropic' if row['slot'] == 'relay' else row['slot']
+                if row['slot'] == 'custom':
+                    slot_provider = row['name']
+                row_base = 'https://api.anthropic.com' if row['baseUrl'] == '官方' else row['baseUrl']
+                if row['role'] == '主' and slot_provider == provider and row_base.rstrip('/') == base:
+                    candidates.append(row)
+            active = next((row for row in candidates if env.get(keys.get(row['slot'], '')) == effective.get('apiKey')), None)
+            active = active or (candidates[0] if candidates else None)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        for row in chat_rows:
+            row['role'] = '主' if row is active else '备'
 
     sf = bool((env.get("SILICONFLOW_API_KEY") or "").strip())
     trans_rows = [
@@ -3217,6 +3278,38 @@ async def _harness_ask(sk: str, questions: list[dict], emit) -> dict:
         _HARNESS_QUESTIONS.pop(identifier, None)
 
 
+def _capture_workbench_turn(req, sk: str, turn_id: str) -> None:
+    if not req.persona:
+        return
+    try:
+        from easel.workbench_evidence import capture_turn
+        capture_turn(req.persona, sk, turn_id, req.message)
+    except Exception as error:
+        raise HTTPException(400, f'无法保存本轮项目来源快照：{error}') from error
+
+
+def _finish_workbench_turn(req, sk: str, turn_id: str, clean_end: bool, reason: str | None,
+                           *, history_unchanged=False) -> None:
+    if not req.persona:
+        return
+    status = ('cancelled' if reason in {'stopped', 'shutdown', 'user_stopped', 'cancelled'}
+              else 'completed' if clean_end else 'failed')
+    try:
+        from easel.workbench_evidence import finish_turn
+        finish_turn(req.persona, sk, turn_id, status, history_unchanged=history_unchanged)
+    except Exception:
+        # Keep the pending snapshot unverified, but never strand runtime locks.
+        print('项目轮次状态保存失败；来源保持未核验', file=sys.stderr)
+
+
+def _direct_history_digest(sk: str) -> str | None:
+    try:
+        path = history_path(SESSIONS_DIR, sk)
+        return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else 'missing'
+    except OSError:
+        return None
+
+
 async def _run_harness_chat(req: ChatRequest, sk: str, message: str, runtime: str,
                             config: dict, emit, timeout: int = TIMEOUT_CHAT, *, interactive=True) -> str:
     pk = f"web:{sk}"
@@ -3266,13 +3359,19 @@ async def _run_harness_chat(req: ChatRequest, sk: str, message: str, runtime: st
         _STOPPED_CHAT.discard(sk)
         proc._task = task
         _RUNNING_CHAT[sk] = proc
+        _capture_workbench_turn(req, sk, turn_id)
         _save_turn(pk, "running", "", {"turn_id": turn_id, "runtime": runtime})
         claimed = True
         env = {**read_settings(ENV_FILE), **_proxy_env(), "EASEL_AGENT_RUNTIME": runtime,
                "EASEL_ROOT": str(PROJECT_ROOT)}
+        web_policy = None
+        if req.persona:
+            from easel.workbench_evidence import session_web_policy
+            web_policy = session_web_policy(req.persona, sk)
         request = RunRequest(message, PROJECT_ROOT, env, native_id,
                              config["models"].get(runtime, ""), config["sandbox"], timeout,
-                             session_key=sk, codex_auto_approve=config.get("codex_auto_approve", False))
+                             session_key=sk, codex_auto_approve=config.get("codex_auto_approve", False),
+                             web_search=web_policy)
         await asyncio.wait_for(harnesses.adapter(runtime).run(
             request, receive, ask,
             lambda identifier: harness_store.bind(SESSIONS_DIR, sk, runtime, identifier)), timeout)
@@ -3294,6 +3393,7 @@ async def _run_harness_chat(req: ChatRequest, sk: str, message: str, runtime: st
     finally:
         if claimed:
             snapshot = "".join(full_text) + (f"\n\n❌ {error_message}" if error_message else "")
+            _finish_workbench_turn(req, sk, turn_id, clean_end, reason)
             _save_turn(pk, "done", snapshot, {
                 "turn_id": turn_id, "runtime": runtime,
                 "clean_end": clean_end, "stop_reason": reason})
@@ -3329,6 +3429,7 @@ async def _run_direct_chat(req: ChatRequest, sk: str, content, system: str, emit
     settings = read_settings(ENV_FILE)
     task = asyncio.current_task()
     _DIRECT_CHAT_TASKS.add(task)
+    history_before = None
     if lock.locked():
         emit("activity", "⏳ 这个会话上一条还在跑，排队等它结束…")
     try:
@@ -3351,6 +3452,8 @@ async def _run_direct_chat(req: ChatRequest, sk: str, content, system: str, emit
                 or (OPENCLAW_SESSIONS_DIR / f"{_openclaw_session_id(sk)}.jsonl").is_file()
                 or (OPENCLAW_SESSIONS_DIR / f"{_openclaw_session_id(pk)}.jsonl").is_file()):
             raise DirectAPIError("此会话属于 OpenClaw，请新建会话使用 API 直连")
+        history_before = _direct_history_digest(sk)
+        _capture_workbench_turn(req, sk, turn_id)
         _save_turn(pk, "running", "", {"turn_id": turn_id})
         claimed = True
         proc._task = asyncio.current_task()
@@ -3374,7 +3477,7 @@ async def _run_direct_chat(req: ChatRequest, sk: str, content, system: str, emit
         reason = "user_stopped" if sk in _STOPPED_CHAT else "cancelled"
         if reason != "user_stopped":
             raise
-    except (DirectAPIError, asyncio.TimeoutError) as error:
+    except (DirectAPIError, HTTPException, asyncio.TimeoutError) as error:
         error_message = str(error) or "API 请求超时"
         emit("error", error_message)
     except OSError:
@@ -3385,6 +3488,9 @@ async def _run_direct_chat(req: ChatRequest, sk: str, content, system: str, emit
         snapshot = "".join(full_text) + (f"\n\n❌ {error_message}" if error_message else "")
         try:
             if claimed:
+                _finish_workbench_turn(req, sk, turn_id, clean_end, reason,
+                                       history_unchanged=(history_before is not None
+                                                          and history_before == _direct_history_digest(sk)))
                 _save_turn(pk, "done", snapshot, {
                     "turn_id": turn_id, "clean_end": clean_end, "stop_reason": reason,
                 })
@@ -3500,6 +3606,8 @@ async def api_chat_stream(req: ChatRequest):
         event_seq = 0
         full_text: list[str] = []        # 累积完整回答，供断线取回
         timed_out = False                # 只有真·超时才 terminate 进程；断线绝不杀
+        turn_error = False
+        run_cancelled = False
 
         event_path = _job_event_file(turn_id)
         try:
@@ -3509,7 +3617,9 @@ async def api_chat_stream(req: ChatRequest):
             pass
 
         def to_client(kind, text=None, **extra):
-            nonlocal event_seq
+            nonlocal event_seq, turn_error
+            if kind == 'error':
+                turn_error = True
             event_seq += 1
             data = ({"sessionKey": extra.get("sessionKey")} if kind == "done" else text)
             event = {"id": event_seq, "event": kind, "data": data}
@@ -3562,6 +3672,7 @@ async def api_chat_stream(req: ChatRequest):
             tool_noted = False
             saw_done = False
             got_text = False
+            finish_reason = None
             try:
                 import httpx as _httpx
                 timeout = _httpx.Timeout(TIMEOUT_CHAT + 60, connect=10)
@@ -3587,7 +3698,9 @@ async def api_chat_stream(req: ChatRequest):
                             if isinstance(d.get("error"), dict):   # 200 里夹错误对象：不能当正常流吞掉
                                 to_client("error", f"❌ 网关返回错误：{str(d['error'])[:160]}")
                                 return
-                            delta = (d.get("choices") or [{}])[0].get("delta") or {}
+                            choice = (d.get("choices") or [{}])[0]
+                            finish_reason = choice.get('finish_reason') or finish_reason
+                            delta = choice.get("delta") or {}
                             # 思考流的两个可能来源，先到先得（`sse_thinking` 闩锁，防两路都来时重复）：
                             # ① 这里的 reasoning 增量 —— openclaw 2026.6.11 的 chat/completions
                             #    实现里 reasoning/thinking 出现 0 次，**不会**给；留着是给别的网关/
@@ -3614,6 +3727,7 @@ async def api_chat_stream(req: ChatRequest):
                     to_client("error", "❌ 网关流异常结束：没有收到任何内容（检查 "
                                        "gateway.http.endpoints.chatCompletions 是否开启，"
                                        "或设 EASEL_CHAT_TRANSPORT=cli 回退）")
+                run_info['http_completed'] = bool(got_text and saw_done and finish_reason == 'stop')
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
@@ -3666,6 +3780,7 @@ async def api_chat_stream(req: ChatRequest):
                 await asyncio.sleep(0.2)
 
             # Only the owner of both locks may replace the session snapshot.
+            _capture_workbench_turn(req, sk, turn_id)
             _save_turn(pk, "running", "", {"turn_id": turn_id})
             claimed = True
 
@@ -3696,6 +3811,9 @@ async def api_chat_stream(req: ChatRequest):
         except asyncio.CancelledError:
             startup_reason = "cancelled"
             raise
+        except HTTPException as error:
+            startup_error = str(error.detail)
+            return
         except Exception:
             startup_error = "❌ 启动失败，请重试"
             return
@@ -3704,6 +3822,7 @@ async def api_chat_stream(req: ChatRequest):
                 # A queued/cancelled waiter never owns the previous snapshot.
                 # Persist an owned failure before releasing either lock.
                 if claimed:
+                    _finish_workbench_turn(req, sk, turn_id, False, startup_reason, history_unchanged=True)
                     _save_turn(pk, "done", startup_error or "", {
                         "turn_id": turn_id, "clean_end": False,
                         "stop_reason": startup_reason,
@@ -3946,6 +4065,9 @@ async def api_chat_stream(req: ChatRequest):
                 if note:
                     full_text.append(note)
                     to_client("token", note)
+        except asyncio.CancelledError:
+            run_cancelled = True
+            raise
         finally:
             # 只有真的在 HTTP 上跑出了内容，才把这个会话钉到 http 上。钉早了（比如选路时就钉）
             # 会把一个其实没跑成的会话锁死在 http，之后每轮都往一条不通的路上撞；而钉住之后
@@ -4000,10 +4122,18 @@ async def api_chat_stream(req: ChatRequest):
             except Exception:
                 pass
             # 落盘完整结果：后端跑完整轮不依赖客户端连接，断线后前端用 /api/chat/last 取回
+            clean_end = bool(not turn_error and not timed_out and not user_stopped and not run_cancelled
+                             and proc.poll() in (0, None)
+                             and (run_info.get('http_completed') if is_http
+                                  else run_info.get('last_ev') == 'assistant_message_end'
+                                  and run_info.get('stop_reason') not in {'length', 'max_tokens', 'model_length', 'tool_use'}))
+            turn_reason = ('user_stopped' if user_stopped else 'shutdown' if run_cancelled
+                           else 'timeout' if timed_out else run_info.get('stop_reason'))
+            _finish_workbench_turn(req, sk, turn_id, clean_end, turn_reason)
             _save_turn(pk, "done", "".join(full_text), {
                 "turn_id": turn_id,
-                "clean_end": run_info.get("last_ev") == "assistant_message_end",
-                "stop_reason": "user_stopped" if user_stopped else run_info.get("stop_reason"),
+                "clean_end": clean_end,
+                "stop_reason": turn_reason,
             })
             xlock.release()
             lock.release()
@@ -4215,12 +4345,18 @@ async def api_chat(req: ChatRequest):
         return {"response": result, "sessionKey": sk}
     if req.sessionId and history_path(SESSIONS_DIR, req.sessionId).is_file():
         raise HTTPException(409, "此会话属于 API 直连，请新建会话使用 OpenClaw")
-    # 每轮末尾追加「先查技能库」提醒，抗长对话指令衰减（对用户不可见）
-    message = _chat_message(req)
-    loop = asyncio.get_event_loop()
-    # chat 可能中途触发制作层长任务 → 用 TIMEOUT_CHAT，与流式 /api/chat/stream 一致（勿用 300s）
-    result = await loop.run_in_executor(None, run_agent_sync, message, TIMEOUT_CHAT, req.sessionId)
-    return {"response": result}
+    # Use the same owned turn lifecycle as streaming: locking, source capture,
+    # completion proof, stop handling, and final persistence must not be bypassed.
+    response = await api_chat_stream(req)
+    parts, errors = [], []
+    async for event in response.body_iterator:
+        if event['event'] == 'token':
+            parts.append(json.loads(event['data']))
+        elif event['event'] == 'error':
+            errors.append(json.loads(event['data']))
+    if errors:
+        raise HTTPException(502, errors[0])
+    return {"response": ''.join(parts)}
 
 
 class SkillRequest(BaseModel):
@@ -4367,20 +4503,45 @@ def _is_protected(full: Path) -> bool:
     )
 
 
+def _contains_workbench_version(full: Path) -> bool:
+    """Preserve immutable version files, manifests and their parent directories."""
+    from easel import workbench as project_state
+    root = OUTPUTS_DIR.resolve()
+    for index in project_state.ROOT.glob('*/state.json'):
+        try:
+            data = json.loads(index.read_text(encoding='utf-8'))
+            versions = data.get('versions', {})
+            for entries in versions.values():
+                for version in entries:
+                    rel = version.get('path')
+                    if not isinstance(rel, str) or not rel:
+                        continue
+                    target = (root / rel).resolve()
+                    if full in (target, target.with_suffix('.json')) or full in target.parents:
+                        return True
+        except (OSError, ValueError, TypeError, AttributeError):
+            raise HTTPException(500, '版本索引损坏或不可读，已停止删除以保护不可变版本') from None
+    return False
+
+
 @app.delete("/api/output/{path:path}")
 async def api_output_delete(path: str):
-    """删除内容库里的单个文件或整个项目目录。系统数据（_login/_analytics/日历/发布记录）受保护。"""
+    """删除公开内容；系统状态和持久版本必须保留。"""
+    from easel import workbench as project_state
     full = _safe_output_target(path)
     if _is_protected(full):
         raise HTTPException(403, '系统数据受保护，不可从内容库删除')
     is_dir = full.is_dir()
-    try:
-        if is_dir:
-            shutil.rmtree(full)
-        else:
-            full.unlink()
-    except OSError as e:
-        raise HTTPException(500, f'删除失败：{e}')
+    with project_state._LOCK:
+        if _contains_workbench_version(full):
+            raise HTTPException(409, '已关联不可变稿件版本，请保留版本文件及其目录')
+        try:
+            if is_dir:
+                shutil.rmtree(full)
+            else:
+                full.unlink()
+        except OSError as e:
+            raise HTTPException(500, f'删除失败：{e}')
     return {"ok": True, "deleted": path, "kind": "dir" if is_dir else "file"}
 
 
@@ -4544,6 +4705,7 @@ async def api_accounts():
     return [
         {'platform': pf, 'name': cfg['name'], 'backend': cfg['backend'],
          'supported': cfg['backend'] != 'unsupported',
+         'loginWindow': bool(cfg.get('login_window')),
          'loggedIn': _account_logged_in(pf, cfg),
          'note': cfg.get('note', '')}
         for pf, cfg in LOGIN_RUNNERS.items()
@@ -4551,15 +4713,17 @@ async def api_accounts():
 
 
 @app.post("/api/login/{platform}")
-async def api_login_start(platform: str, restart: bool = False):
+async def api_login_start(platform: str, restart: bool = False, manual: bool = False):
     if platform not in LOGIN_RUNNERS:
         raise HTTPException(404, '未知平台')
+    if manual and LOGIN_RUNNERS[platform]['backend'] not in ('xhs', 'web', 'douyin'):
+        raise HTTPException(400, '该平台不支持独立窗口手动登录')
     lock = _LOGIN_START_LOCKS.setdefault(platform, asyncio.Lock())
     async with lock:
-        return await _start_login(platform, restart)
+        return await _start_login(platform, restart, manual)
 
 
-async def _start_login(platform: str, restart: bool = False):
+async def _start_login(platform: str, restart: bool = False, manual: bool = False):
     """启动后台登录并立即返回，二维码由前端状态轮询获取。"""
     cfg = LOGIN_RUNNERS.get(platform)
     if not cfg:
@@ -4592,6 +4756,11 @@ async def _start_login(platform: str, restart: bool = False):
     if backend == 'xhs':
         cmd = [sys.executable, str(SHARED_SCRIPTS / 'xhs_publish.py'), 'login', '--no-proxy',
                '--qr-out', str(qr), '--status-file', str(status), '--timeout', str(LOGIN_TIMEOUT)]
+        if manual:
+            cmd.append('--manual-browser')
+        elif sys.platform == 'darwin' and not (os.environ.get('SSH_CONNECTION') or os.environ.get('SSH_TTY')):
+            # 本机 macOS 原生可见内核兼容扫码；与普通 Chrome 手动会话不是同一路径。
+            cmd.append('--headed')
     elif backend == 'biliup':
         # B站：TV 端扫码登录 API 生成二维码 + 写 biliup cookie（biliup login 需真终端，前端用不了）
         cmd = [sys.executable, str(SHARED_SCRIPTS / 'bili_login.py'), 'login',
@@ -4607,6 +4776,8 @@ async def _start_login(platform: str, restart: bool = False):
                '--no-proxy',
                '--qr-out', str(qr), '--status-file', str(status),
                '--sms-code-file', str(code_file), '--timeout', str(LOGIN_TIMEOUT)]
+        if manual:
+            cmd.append('--headed')
     elif backend == 'toutiao':
         # 扫码后可能要求绑定手机号；必须弹有头窗口让账号本人填写手机号和验证码。
         cmd = [sys.executable, str(TOUTIAO_SCRIPTS / 'toutiao_publish.py'), 'login',
@@ -4616,7 +4787,7 @@ async def _start_login(platform: str, restart: bool = False):
         cmd = [sys.executable, str(SHARED_SCRIPTS / 'web_publisher.py'), 'login-qr',
                '--platform', cfg['wp'], '--qr-out', str(qr), '--status-file', str(status),
                '--timeout', str(LOGIN_TIMEOUT)]
-        if cfg.get('login_window'):
+        if manual or cfg.get('login_window'):
             # 无扫码平台（X）：弹有头窗口手动登录，前端按 window_login 状态展示提示
             cmd.append('--headed')
     # 新登录开始 → 清掉旧的 whoami 缓存（登录前可能缓存了「未登录」），避免登录成功后仍读到旧结果
@@ -4635,7 +4806,12 @@ async def _start_login(platform: str, restart: bool = False):
     LOGIN_PROCESSES[platform] = proc
     s = _login_status(platform)
     if s['state'] == 'unknown':
-        s.update(state='starting', message='正在启动浏览器并准备二维码…')
+        message = ('正在打开专用普通 Chrome，请在官网手动登录…' if manual and backend == 'xhs'
+                   else '正在打开浏览器窗口，请在官网手动登录…' if manual or cfg.get('login_window')
+                   else '正在打开原生扫码窗口并准备二维码，请保持专用窗口打开…' if backend == 'xhs' and '--headed' in cmd
+                   else '正在使用无界面原生扫码准备二维码…' if backend == 'xhs'
+                   else '正在启动浏览器并准备二维码…')
+        s.update(state='starting', message=message)
     return {'mode': 'qr', **s}
 
 
@@ -4883,6 +5059,7 @@ async def _check_account_whoami(platform: str, force: bool = False):
         raise HTTPException(504, '校验超时（浏览器起不来或网络慢）')
     data = {'loggedIn': False, 'name': '', 'avatar': ''}
     confident = False
+    verification_error = ''
     for line in reversed((proc.stdout or '').strip().splitlines()):
         line = line.strip()
         if line.startswith('{'):
@@ -4891,6 +5068,8 @@ async def _check_account_whoami(platform: str, force: bool = False):
                 data = {'loggedIn': bool(d.get('loggedIn')), 'name': d.get('name') or '', 'avatar': d.get('avatar') or ''}
                 # 有 error 字段 = 校验本身失败（浏览器起不来/网络抖动/崩溃），不是可信的「未登录」结论
                 confident = proc.returncode == 0 and isinstance(d.get('loggedIn'), bool) and not d.get('error')
+                if backend == 'xhs' and isinstance(d.get('error'), str) and ('手动会话' in d['error'] or '专用 Chrome' in d['error']):
+                    verification_error = d['error']
                 break
             except Exception:
                 continue
@@ -4899,7 +5078,7 @@ async def _check_account_whoami(platform: str, force: bool = False):
             or (current_process is not None and current_process.poll() is None)):
         return {'loggedIn': _account_logged_in(platform, cfg), 'name': '', 'avatar': ''}
     if not confident:
-        raise HTTPException(502, '未能确认当前账号身份，请稍后重试校验；原登录状态和账号资料保持不变')
+        raise HTTPException(502, verification_error or '未能确认当前账号身份，请稍后重试校验；原登录状态和账号资料保持不变')
     verified_logged_in = data['loggedIn']
     if backend == 'wechat-oa' and not verified_logged_in and _wechat_has_credentials():
         account = _wechat_web_account()
@@ -4925,6 +5104,12 @@ async def api_logout(platform: str):
     cfg = LOGIN_RUNNERS.get(platform)
     if not cfg:
         raise HTTPException(404, '未知平台')
+    if cfg['backend'] == 'xhs':
+        if str(SHARED_SCRIPTS) not in sys.path:
+            sys.path.insert(0, str(SHARED_SCRIPTS))
+        from xhs_manual_browser import selected
+        if selected(BROWSER_PROFILES / cfg['profile']):
+            raise HTTPException(409, '请在专用普通 Chrome 的官网页面退出账号；Easel 不会关闭您的 Chrome 或把断开连接报告为退出登录')
     deleted = []
     if cfg['backend'] == 'wechat-oa':
         # 1) 清 AppID 凭证（旧配置兜底）
@@ -5107,6 +5292,8 @@ VIDEO_ONLY_PUBLISH = {"douyin", "weixin-channels", "bilibili"}   # 只能发视�
 
 
 class PublishRequest(BaseModel):
+    task_id: str = ''
+    version_id: str = ''
     title: str = ''
     body: str = ''
     media: list[str] = []
@@ -5117,11 +5304,24 @@ class PublishRequest(BaseModel):
 
 
 class ManualPublishRequest(BaseModel):
+    persona: str = ''
+    task_id: str = ''
+    version_id: str = ''
     title: str = Field(default='', max_length=1000)
     body: str = Field(default='', max_length=100000)
     tags: str = Field(default='', max_length=2000)
     media: list[str] = Field(default_factory=list, max_length=32)
     reviewed: StrictBool = False
+
+
+def _publish_project_link(req) -> dict:
+    if not req.task_id and not req.version_id:
+        return {}
+    from easel.project_schedule import validate_link
+    try:
+        return validate_link({key: getattr(req, key) for key in ('persona', 'task_id', 'version_id')})
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
 
 
 @app.get("/api/publishing-policy")
@@ -5135,16 +5335,33 @@ def _require_automated_publishing() -> None:
         raise HTTPException(403, '当前为人工发布模式，请审核后复制或导出，在平台官方发布页亲自提交')
 
 
+@app.get('/api/manual-publish/download/{filename}')
+def api_manual_package_download(filename: str):
+    import re
+    from easel.manual_publish import PLATFORMS
+    match = re.fullmatch(r'easel-([a-z0-9-]+)-[a-f0-9]{12}\.zip', filename)
+    if not match or match.group(1) not in PLATFORMS:
+        raise HTTPException(404, '未知人工交付包')
+    target = _delivery_file(OUTPUTS_DIR / '_publish' / 'manual', filename)
+    return FileResponse(target, media_type='application/zip', filename=filename, headers={'Cache-Control': 'no-store'})
+
+
 @app.post("/api/manual-publish/{platform}/export")
 def api_manual_publish_export(platform: str, req: ManualPublishRequest):
     """Build a local handoff package; never contact a platform or mark it published."""
+    link = _publish_project_link(req)
     try:
         package = build_package(OUTPUTS_DIR, platform, req.title, req.body,
                                 req.tags, req.media, req.reviewed)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
+    if link:
+        import zipfile
+        with zipfile.ZipFile(package, 'a') as archive:
+            archive.writestr('project-source.json', json.dumps(link, ensure_ascii=False))
     return {"path": package.relative_to(OUTPUTS_DIR.resolve()).as_posix(),
-            "filename": package.name, "published": False}
+            "filename": package.name, "published": False,
+            "download_url": '/api/manual-publish/download/' + package.name}
 
 
 def _write_publish_status(status_file: Path, state: str, message: str = '') -> None:
@@ -5172,25 +5389,30 @@ def _read_publish_status(platform: str) -> dict:
 
 def _record_successful_publish(title: str, body: str, cfg: dict, profile: str = '',
                                tags: str = '', ptype: str = '',
-                               status: str = 'published') -> None:
+                               status: str = 'published', project_link: dict | None = None,
+                               receipt_id: str = '') -> bool:
     try:
+        from easel.project_schedule import canonical_platform
+        platform_name = canonical_platform(cfg['name'])
         scripts_dir = str(SHARED_SCRIPTS)
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
         import calendar_ops
-        with _schedule_lock():
-            calendar_ops.record_publish(cfg['name'], title, note=body[:200],
-                                        tags=tags, ptype=ptype,
-                                        source='publish-page', profile=profile,
-                                        data_path=SCHEDULE_FILE, forward_log=status == 'published',
-                                        status=status)
+        # The identity belongs to an execution, not its content: a deliberate
+        # later republication of the same text is a different real event.
+        receipt_id = receipt_id or uuid.uuid4().hex
+        return calendar_ops.record_publish(platform_name, title, note=body[:200],
+                                    tags=tags, ptype=ptype, source='publish-page', profile=profile,
+                                    data_path=SCHEDULE_FILE, forward_log=status == 'published',
+                                    status=status, project_link=project_link, receipt_id=receipt_id,
+                                    autorecord=False)
     except Exception:
-        pass
+        return False
 
 
 def _run_publish_bg(platform: str, cmd: list, title: str, body: str, cfg: dict,
                     status_file: Path, code_file: Path, profile: str = '',
-                    tags: str = '', ptype: str = '') -> None:
+                    tags: str = '', ptype: str = '', project_link: dict | None = None) -> None:
     """后台线程跑发布脚本（脚本自身把 starting/sms_required/verifying/success/error 写进 status_file）。
     结束后兜底补写终态 + 记 _publish.log + 成功则回流排期。"""
     ok = False
@@ -5219,12 +5441,14 @@ def _run_publish_bg(platform: str, cmd: list, title: str, body: str, cfg: dict,
     except OSError:
         pass
     if ok:
-        _record_successful_publish(title, body, cfg, profile, tags, ptype)
+        recorded = _record_successful_publish(title, body, cfg, profile, tags, ptype, project_link=project_link)
+        if recorded is False:
+            _write_publish_status(status_file, 'success', '发布成功；排期未回填，请在日历选择原记录核对，勿重复发布')
 
 
 def _start_async_publish(platform: str, cmd: list, title: str, body: str, cfg: dict,
                          status_file: Path, code_file: Path, profile: str = '',
-                         tags: str = '', ptype: str = '') -> dict:
+                         tags: str = '', ptype: str = '', project_link: dict | None = None) -> dict:
     """启动异步发布：清旧码/状态 → 起后台线程 → 立即返回。前端轮询 /api/publish/{p}/status，
     遇 sms_required 弹输入框、提交到 /api/publish/{p}/sms。"""
     try:
@@ -5233,7 +5457,7 @@ def _start_async_publish(platform: str, cmd: list, title: str, body: str, cfg: d
         pass
     _write_publish_status(status_file, 'starting', '发布中…（若触发风控会要求短信验证）')
     threading.Thread(target=_run_publish_bg,
-                     args=(platform, cmd, title, body, cfg, status_file, code_file, profile, tags, ptype),
+                     args=(platform, cmd, title, body, cfg, status_file, code_file, profile, tags, ptype, project_link),
                      daemon=True).start()
     # 关键：**不返回 ok:true**——这只是「已启动」的应答，真正结果要靠轮询 /status。
     # 若这里给 ok:true，旧前端会把它当「已发布」立刻显示成功（假成功 bug，真机踩过）。
@@ -5266,12 +5490,23 @@ async def api_publish_sms(platform: str, req: SmsCodeRequest):
 async def api_publish(platform: str, req: PublishRequest):
     """一键发布：分发到对应 publisher 脚本真发（--exec）。二次确认在前端。"""
     _require_automated_publishing()
+    project_link = _publish_project_link(req)
     cfg = LOGIN_RUNNERS.get(platform)
     if not cfg:
         raise HTTPException(404, '未知平台')
     backend = cfg['backend']
     if backend == 'unsupported':
         raise HTTPException(400, f"{cfg['name']} 暂不支持一键发布")
+    if project_link:
+        from easel.project_schedule import canonical_platform
+        with _schedule_lock():
+            pending = [item for item in _read_schedule()
+                       if all(item.get(k) == v for k, v in project_link.items())
+                       and (item.get('kind') or 'content') == 'content'
+                       and item.get('status') != 'published'
+                       and canonical_platform(item.get('platform')) == canonical_platform(cfg['name'])]
+            if len(pending) > 1:
+                raise HTTPException(409, '此版本有多个待发排期，未提交。请先在日历明确原排期；也可人工发布后选择原记录回填。')
     profile = (req.persona or '').strip()
     if profile and (not valid_persona_name(profile) or not profile_exists(profile)):
         raise HTTPException(400, '选择的画像不存在或名称非法')
@@ -5295,8 +5530,8 @@ async def api_publish(platform: str, req: PublishRequest):
         raise HTTPException(400, f"{cfg['name']} 只能发视频，请附带一个视频文件")
     title = req.title.strip() or req.body.strip()[:20]
     tags = req.tags or ''
-    # 仅今日头条支持草稿；其他平台的草稿请求已在上面拒绝。
-    is_draft = platform == 'toutiao' and req.draft
+    # 公众号建草稿不是发表；头条按显式请求执行。
+    is_draft = platform == 'wechat-oa' or (platform == 'toutiao' and req.draft)
     publish_type = '视频' if vids else ('文章' if platform == 'wechat-oa' else '图文')
     py = sys.executable
     if platform == 'xiaohongshu':
@@ -5321,7 +5556,7 @@ async def api_publish(platform: str, req: PublishRequest):
         code_file = PUBLISH_DIR / 'douyin.code'
         cmd += ['--status-file', str(status_file), '--sms-code-file', str(code_file)]
         return _start_async_publish(platform, cmd, title, req.body, cfg, status_file, code_file,
-                                    profile, tags, publish_type)
+                                    profile, tags, publish_type, project_link=project_link)
     elif platform == 'toutiao':
         # 头条图文：正文走 --content 直传（不落临时文件）。一键发布 → --exec；
         # 发布页选了「存草稿」时改用 --draft（只落后台草稿箱，不点发布按钮）。
@@ -5398,11 +5633,14 @@ async def api_publish(platform: str, req: PublishRequest):
             lf.write('STDERR:\n' + (proc.stderr or '')[-2000:] + '\n')
     except Exception:
         pass
+    calendar_recorded = None
     if ok:
-        _record_successful_publish(title, req.body, cfg, profile, tags, publish_type,
-                                   status='draft' if is_draft else 'published')
-    return {'ok': ok, 'message': ('已存草稿' if is_draft else '发布成功') if ok else '发布失败（见 detail）',
-            'detail': detail}
+        calendar_recorded = _record_successful_publish(title, req.body, cfg, profile, tags, publish_type,
+                                   status='draft' if is_draft else 'published', project_link=project_link)
+    message = ('已存草稿' if is_draft else '发布成功') if ok else '发布失败（见 detail）'
+    if ok and calendar_recorded is False:
+        message += '；排期未回填，请在日历选择原记录核对，勿重复发布'
+    return {'ok': ok, 'message': message, 'detail': detail, 'calendarRecorded': calendar_recorded}
 
 
 class ProfileBuildRequest(BaseModel):
@@ -5577,6 +5815,7 @@ from easel.trends.sources import ConfigError as TrendConfigError, load_sources a
 from easel.trends import management as trend_management
 from easel.trends.protocol import CollectorError as TrendCollectorError, safe_json as trend_safe_json
 from easel.trends.protocol import MAX_MANAGEMENT_BYTES
+from easel import workbench
 
 _TREND_SERVICE = TrendService()
 
@@ -5653,6 +5892,211 @@ async def api_trends(platforms: str | None = None, limit: int = 12):
               for identifier, result in zip(selected, results)]
     return {"version": 1, "trends": groups, "updated": int(time.time()), "warnings": warnings}
 
+async def _workbench_trends():
+    """Join an in-flight dashboard collection before snapshotting recommendation sources."""
+    from easel.timeouts import TIMEOUT_TREND_COLLECT, TIMEOUT_TREND_STARTUP
+    collection = await api_trends(limit=30)
+    groups = {group['platform']: group for group in collection.get('trends', [])}
+    deadline = time.monotonic() + TIMEOUT_TREND_COLLECT + TIMEOUT_TREND_STARTUP
+    while time.monotonic() < deadline:
+        pending = [key for key, group in groups.items()
+                   if not group.get('items') and (group.get('error') or {}).get('code') == 'busy']
+        if not pending:
+            break
+        await asyncio.sleep(min(0.25, max(0, deadline - time.monotonic())))
+        refreshed = await api_trends(platforms=','.join(pending), limit=30)
+        groups.update((group['platform'], group) for group in refreshed.get('trends', []))
+    return {**collection, 'trends': list(groups.values())}
+
+
+@app.get('/api/workbench/engines')
+async def api_workbench_engines():
+    from easel.search_providers import public_search_settings
+    env = read_settings(ENV_FILE)
+    config = _harness_settings()
+    runtime = config['runtime']
+    model = env.get('EASEL_DIRECT_API_MODEL', '') if runtime == 'api' else config['models'].get(runtime, '')
+    return {'search': public_search_settings(OUTPUTS_DIR, env),
+            'analysis': {'runtime': runtime, 'model': model, 'label': {'api':'API直连','codex':'Codex','claude':'Claude Code','opencode':'OpenCode'}.get(runtime, runtime)}}
+
+
+class WorkbenchSearchSettingsRequest(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    provider: str = Field(pattern='^(codex|deepseek)$')
+    api_key: str | None = Field(default=None, max_length=1024)
+    clear_key: bool = False
+
+
+@app.post('/api/workbench/search-settings')
+async def api_workbench_search_settings(req: WorkbenchSearchSettingsRequest):
+    from easel.search_providers import save_search_settings
+    try:
+        return save_search_settings(OUTPUTS_DIR, read_settings(ENV_FILE), req.provider, req.api_key, req.clear_key)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+
+
+class WorkbenchRecommendRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    intent: str = Field(min_length=1, max_length=500)
+    exclude: list[str] = Field(default_factory=list, max_length=20)
+    budget: int = 0
+    platforms: list[str] = Field(default_factory=list, max_length=12)
+    days: int = Field(default=3, ge=1, le=7)
+    include_search: bool = False
+
+class WorkbenchTaskRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task: dict
+
+class RadarImportRequest(BaseModel):
+    persona: str
+    source: dict
+
+
+@app.post('/api/workbench/import-source')
+async def api_radar_import(req: RadarImportRequest):
+    from easel.radar import import_source
+    try:
+        return await asyncio.to_thread(import_source, req.persona, req.source)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+
+
+@app.post("/api/workbench/recommend")
+async def api_workbench_recommend(req: WorkbenchRecommendRequest):
+    if not valid_persona_name(req.persona) or not profile_exists(req.persona):
+        raise HTTPException(400, "无效或不存在的画像")
+    try: workbench.validate_inputs(req.intent, req.exclude, req.budget, req.platforms)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+    if req.days not in {1, 3, 7}:
+        raise HTTPException(400, '只支持最近1、3、7天')
+    collection = await _workbench_trends()
+    groups = list(collection.get("trends", []))
+    search_warnings = []
+    if req.include_search:
+        try:
+            from easel.search_providers import search_topics
+            search_result = await search_topics(req.intent, days=req.days, limit=8,
+                                                outputs=OUTPUTS_DIR, environment=read_settings(ENV_FILE),
+                                                model=_harness_settings()['models'].get('codex', ''))
+            search_warnings = search_result.get('warnings', [])
+            groups.append({'platform': '主动联网搜索', 'label': '主动联网搜索',
+                           'ok': bool(search_result.get('items')), 'items': search_result.get('items', []),
+                           'fetched_at': workbench.now(),
+                           'error': {'message': '；'.join(search_warnings) or '没有符合范围的搜索线索'}})
+        except ValueError as error:
+            search_warnings = [str(error)]
+            groups.append({'platform': '主动联网搜索', 'ok': False, 'error': {'message': search_warnings[0]}})
+        except Exception:
+            search_warnings = ['搜索底座调用失败，未伪造搜索结果']
+            groups.append({'platform': '主动联网搜索', 'ok': False, 'error': {'message': search_warnings[0]}})
+    for warning in collection.get("warnings", []):
+        groups.append({"platform": "数据源配置", "ok": False, "error": {"message": str(warning)}})
+    if not groups:
+        groups.append({"platform": "热点采集", "ok": False, "error": {"message": "当前没有启用的数据源，仅能提供常青候选"}})
+    try:
+        return await asyncio.to_thread(workbench.recommend, req.persona, req.intent, req.exclude, req.budget, req.platforms, groups, days=req.days, include_search=req.include_search, search_warnings=search_warnings)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+
+class WorkbenchAnalysisRequest(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    persona: str
+
+
+@app.post('/api/workbench/analyze')
+async def api_workbench_analyze(req: WorkbenchAnalysisRequest):
+    from easel.workbench_analysis import analyze_topics
+    try:
+        return await analyze_topics(req.persona, PROJECT_ROOT, read_settings(ENV_FILE))
+    except (ValueError, HarnessError) as error:
+        raise HTTPException(400, str(error)) from None
+
+
+class WorkbenchBriefRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task_id: str
+    brief: dict
+
+@app.get("/api/workbench/catalog/documents")
+async def api_workbench_documents():
+    return {"items": await asyncio.to_thread(workbench.catalog_documents)}
+
+@app.get("/api/workbench/catalog/document/{document_id}")
+async def api_workbench_document(document_id: str):
+    try: return await asyncio.to_thread(workbench.read_document, document_id)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.get("/api/workbench/catalog/skills")
+async def api_workbench_skills():
+    return {"items": await asyncio.to_thread(workbench.catalog_skills)}
+
+@app.get("/api/workbench/brief/{persona}/{task_id}")
+async def api_workbench_brief(persona: str, task_id: str):
+    try: return await asyncio.to_thread(workbench.load_brief, persona, task_id)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.post("/api/workbench/brief")
+async def api_workbench_brief_save(req: WorkbenchBriefRequest):
+    try: return await asyncio.to_thread(workbench.save_brief, req.persona, req.task_id, req.brief)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+class WorkbenchVersionRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task_id: str
+    name: str
+    text: str
+    source_version_id: str | None = None
+    source_turn_id: str | None = None
+
+@app.get("/api/workbench/versions/{persona}/{task_id}")
+async def api_workbench_versions(persona: str, task_id: str):
+    try: return {"items": await asyncio.to_thread(workbench.list_versions, persona, task_id)}
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.post("/api/workbench/version")
+async def api_workbench_version(req: WorkbenchVersionRequest):
+    try: return await asyncio.to_thread(workbench.save_version, req.persona, req.task_id, req.name, req.text,
+                                       source_version_id=req.source_version_id, source_turn_id=req.source_turn_id)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.get("/api/workbench/{persona}")
+async def api_workbench_get(persona: str):
+    try: return workbench.snapshot(persona)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.post("/api/workbench/task")
+async def api_workbench_task(req: WorkbenchTaskRequest):
+    try: return await asyncio.to_thread(workbench.save_task, req.persona, req.task)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+class WorkbenchContextRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task_id: str
+    format: str
+    platforms: list[str]
+
+class WorkbenchFeedbackRequest(BaseModel):
+    model_config = {"strict": True, "extra": "forbid"}
+    persona: str
+    task_id: str
+
+@app.post("/api/workbench/feedback")
+async def api_workbench_feedback(req: WorkbenchFeedbackRequest):
+    try: return workbench.dismiss(req.persona, req.task_id)
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
+@app.post("/api/workbench/context")
+async def api_workbench_context(req: WorkbenchContextRequest):
+    try: return {"context": workbench.generation_context(req.persona, req.task_id, req.format, req.platforms)}
+    except ValueError as e: raise HTTPException(400, str(e)) from None
+
 
 SCHEDULE_FILE = OUTPUTS_DIR / "_schedule.json"
 SCHEDULE_STATUSES = {"idea", "draft", "scheduled", "published"}
@@ -5663,29 +6107,29 @@ SCHEDULE_KINDS = {"content", "event"}
 _SCHEDULE_LOCK = threading.Lock()
 
 
-def _schedule_lock() -> threading.Lock:
-    return _SCHEDULE_LOCK
+def _schedule_lock():
+    from skills.shared.scripts.calendar_store import lock
+    return lock(SCHEDULE_FILE)
 
 
 def _read_schedule() -> list[dict]:
-    if not SCHEDULE_FILE.is_file():
-        return []
+    from skills.shared.scripts.calendar_store import load
     try:
-        d = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
-        return d if isinstance(d, list) else []
-    except Exception:
-        return []
+        return load(SCHEDULE_FILE)
+    except (ValueError, OSError):
+        raise HTTPException(500, '日历数据损坏或不可读，已停止写入以保护原记录') from None
 
 
 def _write_schedule(items: list[dict]) -> None:
-    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SCHEDULE_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(SCHEDULE_FILE)
+    from skills.shared.scripts.calendar_store import atomic_write
+    atomic_write(SCHEDULE_FILE, items)
 
 
 class ScheduleItem(BaseModel):
     title: str
+    persona: str = ''
+    task_id: str = ''
+    version_id: str = ''
     date: str
     platform: str = ""
     time: str = ""
@@ -5705,6 +6149,11 @@ async def api_schedule_list():
 
 @app.post("/api/schedule")
 async def api_schedule_create(req: ScheduleItem):
+    from easel.project_schedule import validate_link, duplicate
+    try:
+        link = validate_link(req.model_dump())
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
     with _schedule_lock():
         items = _read_schedule()
         kind = req.kind if req.kind in SCHEDULE_KINDS else "content"
@@ -5722,9 +6171,20 @@ async def api_schedule_create(req: ScheduleItem):
             "source": req.source if req.source in {"manual", "publish-page", "chat", "scheduler"} else "manual",
             "event_type": req.event_type,
             "end_date": req.end_date,
+            **link,
         }
+        prior = duplicate(items, item)
+        if prior is not None:
+            if any((prior.get(k) or '') != (item.get(k) or '') for k in ('title','status','url','note')):
+                raise HTTPException(409, '排期已存在；请更新原记录，不能用重复创建覆盖状态或发布回填')
+            return prior
+        from skills.shared.scripts.calendar_ops import mark_manual_publication
+        newly_published = mark_manual_publication(item)
         items.append(item)
         _write_schedule(items)
+    if newly_published:
+        from skills.shared.scripts.calendar_ops import forward_manual_publication
+        await asyncio.to_thread(forward_manual_publication, item, SCHEDULE_FILE)
     return item
 
 
@@ -5734,8 +6194,13 @@ async def api_schedule_update(sid: str, req: ScheduleItem):
         items = _read_schedule()
         for it in items:
             if it.get("id") == sid:
+                from easel.project_schedule import validate_link, duplicate
+                try:
+                    link = validate_link(req.model_dump(), it)
+                except ValueError as error:
+                    raise HTTPException(400, str(error)) from None
                 kind = req.kind if req.kind in SCHEDULE_KINDS else it.get("kind", "content")
-                it.update({
+                proposed = {**it, **{
                     "title": req.title.strip() or it.get("title", "未命名"),
                     "date": req.date,
                     "platform": req.platform,
@@ -5746,10 +6211,22 @@ async def api_schedule_update(sid: str, req: ScheduleItem):
                     "url": req.url,
                     "event_type": req.event_type,
                     "end_date": req.end_date,
-                })
+                    **link,
+                }}
+                if duplicate(items, proposed, exclude_id=sid) is not None:
+                    raise HTTPException(409, '排期身份与已有记录重复，请更新原记录')
+                from skills.shared.scripts.calendar_ops import mark_manual_publication
+                newly_published = mark_manual_publication(proposed, it)
+                it.update(proposed)
                 _write_schedule(items)
-                return it
-    raise HTTPException(404, "排期不存在")
+                saved = it
+                break
+        else:
+            raise HTTPException(404, "排期不存在")
+    if newly_published:
+        from skills.shared.scripts.calendar_ops import forward_manual_publication
+        await asyncio.to_thread(forward_manual_publication, saved, SCHEDULE_FILE)
+    return saved
 
 
 @app.delete("/api/schedule/{sid}")
@@ -5780,79 +6257,82 @@ async def api_schedule_context(days: int = 14):
 
 
 IDEAS_FILE = OUTPUTS_DIR / "_ideas.json"
-IDEA_STATUSES = {"pending", "doing", "done"}
 
 
-def _read_ideas() -> list[dict]:
-    if not IDEAS_FILE.is_file():
-        return []
+from easel import ideas as idea_store
+
+
+def _idea_call(fn, *args, **kwargs):
     try:
-        d = json.loads(IDEAS_FILE.read_text(encoding="utf-8"))
-        return d if isinstance(d, list) else []
-    except Exception:
-        return []
-
-
-def _write_ideas(items: list[dict]) -> None:
-    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = IDEAS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(IDEAS_FILE)
-
-
-class IdeaItem(BaseModel):
-    title: str
-    note: str = ""
-    source: str = ""
-    status: str = "pending"
+        return fn(IDEAS_FILE, *args, **kwargs)
+    except LookupError as error:
+        raise HTTPException(404, str(error)) from None
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
 
 
 @app.get("/api/ideas")
-async def api_ideas_list():
-    return _read_ideas()
+async def api_ideas_list(q: str = '', persona: str = '', exclude: str = '', good_only: bool = False):
+    return _idea_call(idea_store.search, q, persona, exclude, good_only)
 
 
 @app.post("/api/ideas")
-async def api_ideas_create(req: IdeaItem):
-    items = _read_ideas()
-    st = req.status if req.status in IDEA_STATUSES else "pending"
-    item = {
-        "id": uuid.uuid4().hex[:12],
-        "title": req.title.strip() or "未命名选题",
-        "note": req.note,
-        "source": req.source,
-        "status": st,
-        "created": int(time.time()),
-    }
-    items.insert(0, item)
-    _write_ideas(items)
-    return item
+async def api_ideas_create(req: dict):
+    return _idea_call(idea_store.create, req)
 
 
 @app.put("/api/ideas/{iid}")
-async def api_ideas_update(iid: str, req: IdeaItem):
-    items = _read_ideas()
-    for it in items:
-        if it.get("id") == iid:
-            it.update({
-                "title": req.title.strip() or it.get("title", "未命名选题"),
-                "note": req.note,
-                "source": req.source,
-                "status": req.status if req.status in IDEA_STATUSES else it.get("status", "pending"),
-            })
-            _write_ideas(items)
-            return it
-    raise HTTPException(404, "选题不存在")
+async def api_ideas_update(iid: str, req: dict):
+    return _idea_call(idea_store.update, iid, req)
 
 
 @app.delete("/api/ideas/{iid}")
 async def api_ideas_delete(iid: str):
-    items = _read_ideas()
-    new = [it for it in items if it.get("id") != iid]
-    if len(new) == len(items):
-        raise HTTPException(404, "选题不存在")
-    _write_ideas(new)
-    return {"ok": True, "deleted": iid}
+    return _idea_call(idea_store.delete, iid)
+
+
+class IdeaReference(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    idea_id: str
+    version_id: str = ''
+
+
+class IdeaDevelopRequest(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    persona: str
+    format: str = '讨论'
+    platforms: list[str]
+    references: list[IdeaReference] = []
+
+
+@app.post('/api/ideas/{iid}/develop')
+async def api_idea_develop(iid: str, req: IdeaDevelopRequest):
+    return _idea_call(idea_store.develop, iid, req.persona, req.format, req.platforms,
+                      [ref.model_dump() for ref in req.references])
+
+
+@app.get('/api/ideas/{iid}/versions')
+async def api_idea_versions(iid: str, persona: str):
+    return _idea_call(idea_store.versions, iid, persona)
+
+
+class TaskInspirationRequest(BaseModel):
+    model_config = {'strict': True, 'extra': 'forbid'}
+    persona: str
+    task_id: str
+    enabled: bool = False
+    references: list[IdeaReference] = []
+
+
+@app.get('/api/workbench/inspiration/{persona}/{task_id}')
+async def api_task_inspiration(persona: str, task_id: str):
+    return _idea_call(idea_store.task_references, persona, task_id)
+
+
+@app.post('/api/workbench/inspiration')
+async def api_task_inspiration_save(req: TaskInspirationRequest):
+    return _idea_call(idea_store.task_references, req.persona, req.task_id, req.enabled,
+                      [ref.model_dump() for ref in req.references])
 
 
 if __name__ == "__main__":

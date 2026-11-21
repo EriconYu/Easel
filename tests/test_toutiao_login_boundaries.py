@@ -19,19 +19,13 @@ def test_untrusted_navigation_is_not_authenticated(monkeypatch, url):
     assert not tp._is_logged_in(SimpleNamespace(url=url))
 
 
-@pytest.mark.parametrize("status,final_path,expected", [(200, "/profile_v4/index", True),
-    (500, "/profile_v4/index", False), (403, "/profile_v4/index", False),
-    (200, "/intermediate", False), (200, "/auth/page/login", False)])
-def test_backend_confirmation_requires_successful_creator_page(monkeypatch, status, final_path, expected):
-    page = SimpleNamespace(url="https://mp.toutiao.com/intermediate", wait_for_timeout=lambda ms: None)
-
-    def goto(url, **kwargs):
-        page.url = "https://mp.toutiao.com" + final_path
-        return SimpleNamespace(status=status)
-
-    page.goto = goto
-    monkeypatch.setattr(tp, "_needs_phone_binding", lambda p: False)
-    monkeypatch.setattr(tp, "_backend_ui_authenticated", lambda p: True)
+@pytest.mark.parametrize("final_path,ui_ready,expected", [('/profile_v4/index', True, True),
+    ('/profile_v4/index', False, False), ('/intermediate', True, False),
+    ('/auth/page/login', True, False)])
+def test_backend_confirmation_requires_current_creator_ui(monkeypatch, final_path, ui_ready, expected):
+    page = SimpleNamespace(url='https://mp.toutiao.com' + final_path,
+                           goto=lambda *a, **k: pytest.fail('confirmation must not navigate'))
+    monkeypatch.setattr(tp, '_backend_ui_authenticated', lambda p: ui_ready)
     assert tp._backend_authenticated(page) is expected
 
 
@@ -79,6 +73,17 @@ def test_success_is_written_only_after_session_save(browser_stub, monkeypatch, s
     assert tp._qr_login(tp.PROFILE_DIR, qr, status, 30, headed=True) == (1 if save_fails else 0)
     assert states[0] == "starting"
     assert login_state.read_status(str(status))["state"] == ("error" if save_fails else "success")
+
+
+def test_cleanup_failure_does_not_mask_session_save_error(browser_stub, monkeypatch, capsys):
+    page, context, qr, status = browser_stub
+    def close():
+        raise RuntimeError('session save failed')
+    context.close = close
+    monkeypatch.setattr(tp, '_backend_authenticated', lambda p: True)
+    assert tp._qr_login(tp.PROFILE_DIR, qr, status, 30, headed=True) == 1
+    assert login_state.read_status(str(status))['state'] == 'error'
+    assert 'RuntimeError' in capsys.readouterr().err
 
 
 def test_failed_identity_probe_preserves_unknown_state(browser_stub):
