@@ -60,6 +60,32 @@ def test_creator_controls_and_scoped_session_verify_login(page):
     assert tp._backend_authenticated(page)
 
 
+def test_customer_service_phone_iframe_is_not_login_or_binding(page):
+    load(page, AUTH_HTML + '<iframe src="https://helpdesk.bytedance.com/sites/standalone/helpcenter_pc/"></iframe>')
+    page.frame_locator('iframe').locator('body').wait_for()
+    frame = page.frames[-1]
+    frame.locator('body').evaluate("e => e.innerHTML = '<input placeholder=\"请输入手机号方便联系（非必填）\">'")
+    assert not tp._needs_phone_binding(page)
+    assert not tp._login_form_visible(page)
+    assert tp._backend_authenticated(page)
+
+
+def test_confirmation_observes_current_page_without_navigation(page):
+    load(page, AUTH_HTML)
+    navigations = []
+    page.on('framenavigated', lambda frame: navigations.append(frame.url))
+    assert tp._backend_authenticated(page)
+    assert navigations == []
+
+
+def test_current_dashboard_account_name_is_read_without_borrowing_authors(page):
+    load(page, '<article><div class="auth-avator-name">其他作者</div></article>'
+         '<div class="shead_right"><div class="user-panel"><div class="user-auth-avator">'
+         '<div class="auth-avator-name">离线测试账号</div></div></div></div>')
+    assert tp._backend_authenticated(page)
+    assert tp._read_display_name(page) == '离线测试账号'
+
+
 def test_identity_is_not_borrowed_from_another_content_author(page):
     load(page, '<article><span class="user-name">其他作者</span></article>' + AUTH_HTML)
     assert tp._read_display_name(page) == '我的头条号'
@@ -73,6 +99,22 @@ def test_probe_on_empty_200_preserves_previous_account_as_unknown(page, tmp_path
     monkeypatch.setattr(tp, 'PROFILE_DIR', tmp_path / 'profile')
     result = tp._probe_identity()
     assert not result['loggedIn'] and result.get('error')
+
+
+def test_probe_waits_for_slow_authenticated_ui_without_reloading(page, tmp_path, monkeypatch):
+    load(page, '<main>正在加载</main>')
+    waited = []
+    def advance(milliseconds):
+        waited.append(milliseconds)
+        if len(waited) == 3:
+            page.set_content(AUTH_HTML)
+    monkeypatch.setattr(page, 'wait_for_timeout', advance)
+    context = SimpleNamespace(pages=[page], close=lambda: None)
+    pw = SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=lambda *a, **k: context))
+    monkeypatch.setattr(tp, '_require_playwright', lambda: lambda: nullcontext(pw))
+    monkeypatch.setattr(tp, 'PROFILE_DIR', tmp_path / 'profile')
+    assert tp._probe_identity()['loggedIn'] is True
+    assert len(waited) >= 3
 
 
 def test_no_detected_qr_never_screenshots_an_entire_form(page, tmp_path, monkeypatch):

@@ -131,6 +131,30 @@ test('empty catalogs and valid Unicode names with spaces remain supported', () =
   assert.equal(personaExports.parsePersonas(list), list);
 });
 
+test('profile management labels and actions describe the working profile, and browsing does not select it', async () => {
+  const selected=[];
+  const input={...props, persona:'', onUsePersona:name=>selected.push(name),
+    loadPersonas:async()=>[{name:'AI 博主',description:''}]};
+  const render=mount('default');
+  render(input); await drain();
+  const tree=render(input);
+  assert.ok(nodes(tree).some(node=>node.type==='span'&&String(node.props.children?.[0] ?? node.props.children).includes('当前工作画像')));
+  const use=nodes(tree).find(node=>node.type==='button'&&node.props.children==='设为当前工作画像');
+  assert.ok(use);
+  nodes(tree).find(node=>node.type==='button'&&node.props.children==='查看 / 编辑').props.onClick();
+  assert.equal(selected.length,0);
+  assert.equal(render(input).props.persona,'AI 博主');
+  use.props.onClick();
+  assert.deepEqual(selected,['AI 博主']);
+});
+
+test('profile detail marks the current working profile rather than claiming to change the current conversation',async()=>{
+  const render=mount('ProfileDetail',{fetchPersonaFiles:async()=>({files:[]})});
+  const input={...props,inUse:true,workingPersona:'AI 博主'};
+  render(input); await drain();
+  assert.ok(nodes(render(input)).some(node=>node.props?.className==='badge badge-accent'&&node.props.children==='当前使用中'));
+});
+
 // Execute the component's hooks and event handlers without a browser or extra test dependencies.
 function mount(component, api = {}, confirm = true) {
   const slots = [], effects = [];

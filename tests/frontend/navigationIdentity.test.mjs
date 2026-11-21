@@ -7,7 +7,7 @@ function callback(name,env){
  const visit=n=>{if(ts.isVariableDeclaration(n)&&n.name.getText(file)===name)found=n;ts.forEachChild(n,visit);};visit(file);
  return runInNewContext(ts.transpileModule(`const ${found.getText(file)}; ${name};`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,{useCallback:fn=>fn,...env});
 }
-test('归档和删除当前会话时，通用会话同步清空画像，不切已归档会话',async()=>{
+test('归档和删除当前会话时保留工作画像，不切已归档会话',async()=>{
  for(const name of ['handleSessionArchive','handleSessionDelete']){
   const state={sessions:[{id:'current',persona:'甲',messages:[]},{id:'archived',persona:'乙',archived:true,messages:[]},{id:'general',messages:[]}],persona:'甲',active:'current'};
   const env={activeSessionId:'current',selectedPersona:'甲',sessionsRef:{current:state.sessions},
@@ -16,7 +16,7 @@ test('归档和删除当前会话时，通用会话同步清空画像，不切�
    createSession:()=>({id:'new',messages:[]}),streamCtl:{current:{}},streamAcc:{current:{}},clearStream:()=>{},stopChat:async()=>({}),
    window:{confirm:()=>true},sessionStorage:{removeItem(){}},deleteRemoteSession:async()=>{}};
   env.activateSession=callback('activateSession',env);
-  await callback(name,env)('current',true);assert.equal(state.active,'general',name);assert.equal(state.persona,'',name);
+  await callback(name,env)('current',true);assert.equal(state.active,'general',name);assert.equal(state.persona,'甲',name);
  }
 });
 test('发送显式通用会话时不回退全局画像，无会话不发送',()=>{
@@ -34,7 +34,7 @@ test('首页待发计数不限预览五条，最近产物携带精确路径',asy
  },{persona:'',gatewayStatus:'connected',apiDirect:true,agentRuntime:'api',onNavigate:()=>{},onOpenProject:async()=>{},onOpenOutput:path=>paths.push(path)});
  await h.flush();
  const stat=h.render().find(n=>n.type==='button'&&h.text(n).includes('待发排期'));
- assert.equal(h.text(stat),'8待发排期');
+ assert.equal(h.text(stat),'8待发排期未归属');
  assert.equal(h.render().filter(n=>n.props?.className==='dash-sched').length,5);
  h.render().find(n=>n.props?.className==='dash-output').props.onClick();assert.deepEqual(paths,['目录/完整稿.md']);
 });

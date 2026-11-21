@@ -10,9 +10,7 @@ const source = readFileSync(new URL('../../web/frontend/src/App.tsx', import.met
 const parsed = ts.createSourceFile('App.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 let declaration;
 function findCallback(node) {
-  if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'handlePersonaChange') {
-    declaration = node;
-  }
+  if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'handlePersonaChange') declaration = node;
   ts.forEachChild(node, findCallback);
 }
 findCallback(parsed);
@@ -20,13 +18,10 @@ assert.ok(declaration);
 const { outputText } = ts.transpileModule(`const ${declaration.getText(parsed)}; handlePersonaChange;`, {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 });
-
 function setup(sessions, activeSessionId) {
-  const state = { sessions, activeSessionId, selectedPersona: undefined, saved: undefined };
+  const state = { sessions, activeSessionId, selectedPersona: undefined, saved: undefined, page:'ideas' };
   const changePersona = runInNewContext(outputText, {
-    activeSessionId,
-    sessionsRef: { current: sessions },
-    useCallback: callback => callback,
+    activeSessionId, sessionsRef: { current: sessions }, useCallback: callback => callback,
     setSelectedPersona: persona => { state.selectedPersona = persona; },
     setCurrentPage: page => { state.page = page; },
     setSessions: update => { state.sessions = update(state.sessions); },
@@ -37,44 +32,38 @@ function setup(sessions, activeSessionId) {
   return { state, changePersona };
 }
 
-test('changing persona on a populated conversation preserves its identity and history', () => {
-  const original = { id: 'original', persona: '旧画像', messages: [{ role: 'user', content: '历史' }] };
-  const { state, changePersona } = setup([original], original.id);
-  changePersona('新画像');
-  assert.equal(state.sessions.length, 2);
-  assert.equal(state.activeSessionId, 'new-session');
-  assert.equal(state.sessions[0].persona, '新画像');
-  assert.equal(state.sessions[1], original);
-  assert.equal(original.persona, '旧画像');
-  assert.equal(original.messages[0].content, '历史');
-  assert.equal(state.selectedPersona, '新画像');
-  assert.equal(state.saved, state.sessions);
-  assert.equal(state.page, 'chat');
-});
-
-test('an empty conversation adopts its persona without creating another conversation', () => {
-  const original = { id: 'original', persona: '旧画像', messages: [] };
-  const { state, changePersona } = setup([original], original.id);
-  changePersona('新画像');
-  assert.equal(state.sessions.length, 1);
-  assert.equal(state.activeSessionId, original.id);
-  assert.equal(state.sessions[0].persona, '新画像');
-  assert.equal(state.saved, state.sessions);
-});
-
-test('switching to general mode creates an unbound conversation and keeps the old one', () => {
-  const original = { id: 'original', persona: '旧画像', messages: [{ role: 'user', content: '历史' }] };
-  const { state, changePersona } = setup([original], original.id);
+for (const messages of [[{role:'user',content:'历史'}], []]) {
+  test(`switching working profile preserves ${messages.length ? 'populated' : 'empty'} chat identity and stays on the current work page`, () => {
+    const original={id:'original',persona:'旧画像',messages};
+    const snapshot=JSON.stringify(original);
+    const {state,changePersona}=setup([original],original.id);
+    changePersona('新画像');
+    assert.equal(state.selectedPersona,'新画像');
+    assert.equal(state.sessions.length,1);
+    assert.equal(state.sessions[0],original);
+    assert.equal(JSON.stringify(original),snapshot);
+    assert.equal(state.activeSessionId,original.id);
+    assert.equal(state.saved,undefined);
+    assert.equal(state.page,'ideas');
+  });
+}
+test('explicit general working mode does not replace or rewrite historical conversations',()=>{
+  const original={id:'original',persona:'旧画像',messages:[{role:'user',content:'历史'}]};
+  const {state,changePersona}=setup([original],original.id);
   changePersona('');
-  assert.equal(state.sessions[0].persona, undefined);
-  assert.equal(state.sessions[1], original);
-  assert.equal(state.selectedPersona, '');
+  assert.equal(state.selectedPersona,'');
+  assert.equal(state.sessions.length,1);
+  assert.equal(state.sessions[0],original);
+  assert.equal(state.activeSessionId,original.id);
+  assert.equal(state.saved,undefined);
+  assert.equal(state.page,'ideas');
 });
-
-test('without an active conversation, persona selection safely creates one', () => {
-  const { state, changePersona } = setup([], null);
+test('selecting a working profile without a chat does not implicitly create one',()=>{
+  const {state,changePersona}=setup([],null);
   changePersona('新画像');
-  assert.equal(state.sessions.length, 1);
-  assert.equal(state.sessions[0].persona, '新画像');
-  assert.equal(state.activeSessionId, 'new-session');
+  assert.equal(state.selectedPersona,'新画像');
+  assert.equal(state.sessions.length,0);
+  assert.equal(state.activeSessionId,null);
+  assert.equal(state.saved,undefined);
+  assert.equal(state.page,'ideas');
 });

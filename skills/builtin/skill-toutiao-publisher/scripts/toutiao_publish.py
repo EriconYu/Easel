@@ -140,6 +140,7 @@ QR_SELECTORS = [
 # URL 命中这些片段 = 还在登录/SSO 流程里（未登录）。
 _LOGIN_URL_HINTS = ("login", "signin", "passport", "sso", "auth/page")
 _ACCOUNT_NAME_SELECTORS = (
+    ".shead_right .user-panel .user-auth-avator .auth-avator-name",
     "[class*='user-info'] [class*='user-name']",
     "[class*='user-info'] [class*='userName']",
     "[class*='user-info'] [class*='nickname']",
@@ -566,7 +567,16 @@ def _needs_phone_binding(page) -> bool:
 
 
 def _visible_form(page, selector: str) -> bool:
-    for frame in [page, *getattr(page, "frames", [])]:
+    # Customer-service embeds include an optional contact phone field even on
+    # authenticated dashboards. Only the main page / official auth frames can
+    # provide login challenges; an arbitrary third-party iframe cannot.
+    frames = [page]
+    for frame in getattr(page, 'frames', []):
+        parsed = urlparse(getattr(frame, 'url', '') or '')
+        if (parsed.scheme == 'https' and parsed.hostname in {
+                'mp.toutiao.com', 'sso.toutiao.com', 'passport.toutiao.com'}):
+            frames.append(frame)
+    for frame in frames:
         try:
             if any(element.is_visible() for element in frame.locator(selector).all()):
                 return True
@@ -598,26 +608,21 @@ def _backend_ui_authenticated(page) -> bool:
 
 
 def _backend_authenticated(page) -> bool:
-    """离开扫码页后重进创作者后台，避免中途跳转被误判为登录成功。"""
-    if not _is_logged_in(page):
-        return False
+    """Observe only: revisiting HOME resets slow UI and can interrupt SSO."""
     try:
-        response = page.goto(HOME_URL, wait_until="domcontentloaded", timeout=30000)
-        if response is None or not 200 <= response.status < 300:
-            return False
-        page.wait_for_timeout(2500)
+        parsed = urlparse(page.url or '')
+        return (not getattr(page, 'is_closed', lambda: False)()
+                and parsed.path.startswith('/profile_v4/')
+                and _backend_ui_authenticated(page))
     except Exception:
         return False
-    return (_is_logged_in(page)
-            and urlparse(page.url).path.rstrip('/') == urlparse(HOME_URL).path.rstrip('/')
-            and _backend_ui_authenticated(page))
 
 
 def _capture_qr(page, qr_out: Path) -> bool:
     """只截已识别的二维码元素，未识别时交给可见窗口，不截整页。"""
     deadline = time.time() + 15
     while time.time() < deadline:
-        if _needs_phone_binding(page):
+        if getattr(page, 'is_closed', lambda: False)() or _needs_phone_binding(page):
             return False
         for sel in QR_SELECTORS:
             try:
@@ -628,8 +633,52 @@ def _capture_qr(page, qr_out: Path) -> bool:
                         return True
             except Exception:
                 continue
-        page.wait_for_timeout(500)
+        _login_wait(page, 500)
     return False
+
+
+def _live_official_pages(ctx) -> list:
+    """SSO may replace its tab. Never borrow a closed or unrelated page."""
+    pages = []
+    for candidate in ctx.pages:
+        if getattr(candidate, 'is_closed', lambda: False)():
+            continue
+        parsed = urlparse(candidate.url or '')
+        if parsed.scheme == 'https' and parsed.hostname in {
+                'mp.toutiao.com', 'sso.toutiao.com', 'passport.toutiao.com'}:
+            pages.append(candidate)
+    return pages
+
+
+def _current_login_page(ctx, previous):
+    pages = _live_official_pages(ctx)
+    # Prefer a completed official backend over an old login tab.
+    for candidate in reversed(pages):
+        if _backend_authenticated(candidate):
+            return candidate
+    if previous in pages:
+        return previous
+    if pages:
+        return pages[-1]
+    raise RuntimeError('今日头条窗口已关闭或已离开官方页面，未确认登录状态')
+
+
+def _login_wait(page, milliseconds: int):
+    try:
+        page.wait_for_timeout(milliseconds)
+    except Exception:
+        if not getattr(page, 'is_closed', lambda: False)():
+            raise
+        # The caller must select and verify a surviving official tab.
+
+
+def _log_login_error(stage: str, exc: Exception):
+    """Keep useful stack locations, never log DOM, cookies or SSO query data."""
+    import traceback
+    print(f'[toutiao:{stage}] {type(exc).__name__}', file=sys.stderr, flush=True)
+    for frame in traceback.extract_tb(exc.__traceback__):
+        print(f'  {Path(frame.filename).name}:{frame.lineno} in {frame.name}',
+              file=sys.stderr, flush=True)
 
 
 def _qr_login(profile: Path, qr_out: Path, status_file: Path, timeout_s: int,
@@ -653,9 +702,14 @@ def _qr_login(profile: Path, qr_out: Path, status_file: Path, timeout_s: int,
                 str(profile), headless=not headed, locale="zh-CN", args=LAUNCH_ARGS,
                 viewport={"width": 1440, "height": 900},
             )
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
-            page.goto(LOGIN_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(2500)
+            pages = _live_official_pages(ctx)
+            page = pages[-1] if pages else (ctx.pages[0] if ctx.pages else ctx.new_page())
+            if not pages:
+                page.goto(LOGIN_URL, wait_until="domcontentloaded")
+                _login_wait(page, 2500)
+            elif not _backend_authenticated(page):
+                _login_wait(page, 2500)
+            page = _current_login_page(ctx, page)
             if _backend_authenticated(page):
                 ctx.close()
                 ctx = None
@@ -688,7 +742,9 @@ def _qr_login(profile: Path, qr_out: Path, status_file: Path, timeout_s: int,
                     print(f"📱 二维码已保存：{qr_out}")
             deadline = time.time() + max(timeout_s, 30)
             while time.time() < deadline:
-                page.wait_for_timeout(2000)
+                page = _current_login_page(ctx, page)
+                _login_wait(page, 2000)
+                page = _current_login_page(ctx, page)
                 if _needs_phone_binding(page):
                     if not headed:
                         qr_out.unlink(missing_ok=True)
@@ -720,11 +776,15 @@ def _qr_login(profile: Path, qr_out: Path, status_file: Path, timeout_s: int,
         except Exception as exc:
             # 浏览器起不来（内核没装 / profile 被占用）也必须把状态写成 error：
             # 真机踩到过——launch 抛异常时状态文件卡在 starting，前端只能等进程退出才兜出失败。
+            _log_login_error('login', exc)
             login_state.write_status(str(status_file), "error", f"登录失败：{exc}")
             return 1
         finally:
             if ctx is not None:
-                ctx.close()
+                try:
+                    ctx.close()
+                except Exception as exc:
+                    _log_login_error('cleanup', exc)
 
 
 def _probe_identity(headed: bool = False) -> dict:
@@ -746,22 +806,29 @@ def _probe_identity(headed: bool = False) -> dict:
                 str(PROFILE_DIR), headless=not headed, locale="zh-CN", args=LAUNCH_ARGS,
                 viewport={"width": 1440, "height": 900},
             )
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            pages = _live_official_pages(ctx)
+            page = pages[-1] if pages else (ctx.pages[0] if ctx.pages else ctx.new_page())
             try:
-                response = page.goto(HOME_URL, wait_until="domcontentloaded", timeout=45000)
-                if response is None or not 200 <= response.status < 300:
-                    raise RuntimeError("头条号后台加载失败，未确认登录状态")
-                page.wait_for_timeout(2500)
-                out["loggedIn"] = _backend_ui_authenticated(page)
-                if out["loggedIn"]:
-                    out["name"] = _read_display_name(page)
-                elif not _login_form_visible(page):
+                if not pages:
+                    response = page.goto(HOME_URL, wait_until="domcontentloaded", timeout=45000)
+                    if response is None or not 200 <= response.status < 300:
+                        raise RuntimeError("头条号后台加载失败，未确认登录状态")
+                deadline = time.monotonic() + 8
+                while True:
+                    page = _current_login_page(ctx, page)
+                    if _backend_authenticated(page):
+                        out['loggedIn'] = True
+                        out['name'] = _read_display_name(page)
+                        break
                     parsed = urlparse(page.url)
-                    on_login_page = (parsed.scheme == 'https' and parsed.hostname == 'mp.toutiao.com'
-                                     and any(h in parsed.path.lower() for h in _LOGIN_URL_HINTS))
-                    qr_visible = on_login_page and _visible_form(page, ', '.join(QR_SELECTORS))
-                    if not qr_visible:
+                    on_login_page = any(h in parsed.path.lower() for h in _LOGIN_URL_HINTS)
+                    if _needs_phone_binding(page) or (on_login_page and (
+                            _login_form_visible(page) or _visible_form(page, ', '.join(QR_SELECTORS)))):
+                        break
+                    if time.monotonic() >= deadline:
                         out['error'] = '后台页面尚未就绪，未确认账号身份，请稍后重试'
+                        break
+                    _login_wait(page, 250)
             finally:
                 ctx.close()
     except Exception as exc:

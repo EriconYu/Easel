@@ -19,7 +19,7 @@ import OnboardingWizard from './components/OnboardingWizard';
 import SettingsPanel from './components/SettingsPanel';
 import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat } from './lib/api';
 import type { PersonaItem, UploadedFile, ChatQuestion } from './lib/api';
-import { availablePersona, parsePersonas } from './lib/personas';
+import { availablePersona, parsePersonas, loadWorkingPersona, saveWorkingPersona } from './lib/personas';
 import { questionStatus } from './lib/api';
 import { deleteSession as deleteRemoteSession } from './lib/api';
 import {
@@ -54,15 +54,29 @@ export default function App() {
   const personaRequestId = useRef(0);
   const refreshPersonas = useCallback(async () => {
     const id = ++personaRequestId.current;
-    const list = await fetchPersonas();
+    const list = parsePersonas(await fetchPersonas());
     if (personaRequestId.current !== id) return null;
     setPersonas(list);
     // 空字符串是显式通用模式，刷新画像列表不得把它改成唯一画像。
     setPersonasLoaded(true);
     return list;
   }, []);
-  const [requestedPersona, setSelectedPersona] = useState('');
-  const selectedPersona = availablePersona(requestedPersona, personasLoaded ? personas : null);
+  const [requestedPersona, setSelectedPersona] = useState<string | null>(() => loadWorkingPersona());
+  // Capture migration evidence before restoring a tab or persisting a new active session.
+  const [legacyPersona] = useState(() => {
+    const lastId = loadActiveId();
+    return loadSessions().find(session => session.id === lastId)?.persona;
+  });
+  const selectedPersona = availablePersona(requestedPersona ?? '', personasLoaded ? personas : null);
+  useEffect(() => {
+    if (!personasLoaded) return;
+    setSelectedPersona(current => current !== null ? availablePersona(current, personas)
+      : personas.length === 1 ? personas[0].name
+      : availablePersona(legacyPersona, personas) || null);
+  }, [personas, personasLoaded, legacyPersona]);
+  useEffect(() => {
+    if (requestedPersona !== null) saveWorkingPersona(requestedPersona);
+  }, [requestedPersona]);
   const [sessions, setSessions] = useState<ChatSession[]>(() => loadSessions());
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [gatewayStatus, setGatewayStatus] = useState('connecting');
@@ -122,8 +136,7 @@ export default function App() {
     const settle = (id: string, sess: ChatSession[]) => {
       setSessions(sess);
       setActiveSessionId(id);
-      const s = sess.find((x) => x.id === id);
-      if (s) setSelectedPersona(s.persona || '');
+
       try { sessionStorage.setItem(TAB_SESSION_KEY, id); } catch { /* ignore */ }
       ch?.postMessage({ type: 'claim', sessionId: id });
     };
@@ -676,10 +689,9 @@ export default function App() {
     });
   }, []);
 
-  // 所有自动/手动会话切换都同步身份；通用会话明确清空画像。
+  // Restoring/browsing chat history must not change the independent work context.
   const activateSession = useCallback((session: ChatSession) => {
     setActiveSessionId(session.id);
-    setSelectedPersona(session.persona ?? '');
   }, []);
 
   const handleSessionArchive = useCallback((id: string, archived: boolean) => {
@@ -873,26 +885,9 @@ export default function App() {
   };
 
   const handlePersonaChange = useCallback((persona: string) => {
+    // Work context is independent of chat identity; switching never starts a turn.
     setSelectedPersona(persona);
-    setCurrentPage('chat');
-    const cur = sessionsRef.current.find((s) => s.id === activeSessionId);
-    if (cur && cur.messages.length === 0) {
-      setSessions((prev) => {
-        const updated = prev.map((s) =>
-          s.id === activeSessionId ? { ...s, persona: persona || undefined } : s);
-        saveSessions(updated);
-        return updated;
-      });
-      return;
-    }
-    const newSession = createSession(persona || undefined);
-    setSessions((prev) => {
-      const updated = [newSession, ...prev];
-      saveSessions(updated);
-      return updated;
-    });
-    setActiveSessionId(newSession.id);
-  }, [activeSessionId]);
+  }, []);
 
   return (
     <div className="app-layout">
@@ -912,6 +907,19 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <main className="main-content">
+        <div className="working-persona-bar" role="region" aria-label="工作画像">
+          <label htmlFor="working-persona">当前工作画像</label>
+          <select id="working-persona" aria-label="当前工作画像"
+            value={requestedPersona === null ? '__unselected__' : selectedPersona}
+            onChange={event => handlePersonaChange(event.target.value)}>
+            {requestedPersona === null && <option value="__unselected__" disabled>未选择工作画像</option>}
+            <option value="">通用模式</option>
+            {!personasLoaded && selectedPersona && <option value={selectedPersona}>{selectedPersona}（待验证）</option>}
+            {personas.map(persona => <option key={persona.name} value={persona.name}>{persona.name}</option>)}
+          </select>
+          <button className="btn btn-sm" onClick={() => setCurrentPage('profile')}>管理画像</button>
+          <small>{!personasLoaded ? '画像列表尚未加载，已保留选择。' : '用于工作页面和新对话；已有对话身份不变。'}</small>
+        </div>
         {sessionSaveError && <div className="notice-error" role="alert">会话或工作草稿未能写入浏览器存储，内容仅在当前标签内保留，关闭或刷新可能丢失。请检查存储空间或权限。<button className="btn btn-sm" onClick={() => setSessionSaveError(false)}>关闭提示</button></div>}
         {(['trends', 'ideas', 'calendar', 'publish', 'breakdown'] as Page[]).includes(currentPage) && (
           <SubNav current={currentPage} onNavigate={setCurrentPage} />

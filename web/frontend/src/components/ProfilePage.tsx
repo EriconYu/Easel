@@ -105,6 +105,7 @@ export default function ProfilePage(props: ProfilePageProps) {
 
   if (!loading && !error && viewedPersona && personas.some((p) => p.name === viewedPersona)) {
     return <ProfileDetail key={viewedPersona} {...props} persona={viewedPersona}
+      workingPersona={props.persona}
       inUse={viewedPersona === props.persona}
       onBack={() => { setViewedPersona(''); setRevision((n) => n + 1); }}
       onDeleted={handleDeleted} />;
@@ -121,7 +122,7 @@ export default function ProfilePage(props: ProfilePageProps) {
       </div>
       <div className="profile-mode-note">
         <IconProfile size={18} />
-        <span>{props.persona ? `当前对话使用「${props.persona}」` : '当前对话为通用模式'}<small>查看和编辑画像不会切换对话身份。</small></span>
+        <span>{props.persona ? `当前工作画像：「${props.persona}」` : '当前工作画像：通用模式'}<small>查看和编辑不会切换工作画像；设置只影响工作页面和新对话。</small></span>
         {props.persona && <button className="btn btn-sm" onClick={() => props.onUsePersona('')}>使用通用模式</button>}
       </div>
       {notice && <p role="status">{notice}</p>}
@@ -138,13 +139,14 @@ export default function ProfilePage(props: ProfilePageProps) {
             {personas.map((p) => <article className="card profile-summary" key={p.name}>
               <div className="profile-summary-head">
                 <div className="profile-avatar"><IconProfile size={22} /></div>
-                {p.name === props.persona && <span className="badge badge-accent">当前使用</span>}
+                {p.name === props.persona && <span className="badge badge-accent">当前使用中</span>}
               </div>
               <h2>{p.name}</h2>
               <p className="profile-summary-description">{p.description || '还没有定位简介，打开画像完善你的创作方向。'}</p>
               <div className="profile-summary-actions">
                 <button className="btn" onClick={() => setViewedPersona(p.name)}>查看 / 编辑</button>
-                <button className="btn btn-primary" onClick={() => props.onUsePersona(p.name)}>切换画像</button>
+                <button className="btn btn-primary" disabled={p.name === props.persona}
+                  onClick={() => props.onUsePersona(p.name)}>{p.name === props.persona ? '当前使用中' : '设为当前工作画像'}</button>
               </div>
             </article>)}
           </div>
@@ -153,7 +155,8 @@ export default function ProfilePage(props: ProfilePageProps) {
   );
 }
 
-function ProfileDetail({ persona, onDeleted, onBack, onUsePersona, inUse }: Omit<ProfilePageProps, 'onDeleted'> & {
+function ProfileDetail({ persona, onDeleted, onBack, onUsePersona, inUse, workingPersona }: Omit<ProfilePageProps, 'onDeleted'> & {
+  workingPersona: string;
   onDeleted: (name: string, alreadyMissing?: boolean) => void;
   onBack: () => void;
   inUse: boolean;
@@ -254,8 +257,11 @@ function ProfileDetail({ persona, onDeleted, onBack, onUsePersona, inUse }: Omit
               && !window.confirm('还有未保存的修改，确定返回画像列表吗？')) return;
           onBack();
         }}>← 全部画像</button>
-        {inUse ? <span className="badge badge-accent">当前对话使用中</span>
-          : <button className="btn btn-sm" onClick={() => onUsePersona(persona)}>切换画像</button>}
+        {inUse ? <span className="badge badge-accent">当前使用中</span>
+          : <button className="btn btn-sm" onClick={() => onUsePersona(persona)}>设为当前工作画像</button>}
+      </div>
+      <div className="profile-mode-note">
+        <span>{workingPersona ? `当前工作画像：「${workingPersona}」` : '当前工作画像：通用模式'}<small>查看和编辑不会切换工作画像；已有对话身份不变。</small></span>
       </div>
       <div className="profile-head">
         <div>

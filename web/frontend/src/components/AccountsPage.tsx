@@ -162,6 +162,37 @@ export default function AccountsPage() {
     load();
   }, [stopPoll, load]);
 
+  // A browser task can fail after authentication succeeded. Verify the saved
+  // session independently; never make an error dialog force a fresh login.
+  const recheckLogin = useCallback(async () => {
+    if (!qr || !['error', 'expired'].includes(qr.state)) return;
+    const platform = qr.platform;
+    const sequence = ++qrRequest.current;
+    stopPoll();
+    whoamiRequests.current[platform] = (whoamiRequests.current[platform] || 0) + 1;
+    setBusy(platform + ':verify');
+    try {
+      const result = await accountWhoami(platform, true);
+      if (!aliveRef.current || qrRequest.current !== sequence) return;
+      setWhoami((previous) => ({ ...previous, [platform]: result }));
+      setWhoamiCache(platform, result);
+      setAccounts((previous) => previous.map((account) => account.platform === platform
+        ? { ...account, loggedIn: result.loggedIn } : account));
+      setQr((previous) => previous && ({ ...previous,
+        state: result.loggedIn ? 'success' : 'error', qr: '',
+        message: result.loggedIn ? '已核验现有登录态，无需重新扫码'
+          : '未检测到可复用的登录态，请确认在 Easel 专用窗口完成登录后再核验',
+      }));
+    } catch (error) {
+      if (!aliveRef.current || qrRequest.current !== sequence) return;
+      setQr((previous) => previous && ({ ...previous, state: 'error', qr: '',
+        message: `暂时无法核验，原登录态已保留。${error instanceof Error ? error.message : '请稍后重试'}`,
+      }));
+    } finally {
+      if (aliveRef.current && qrRequest.current === sequence) setBusy('');
+    }
+  }, [qr, stopPoll]);
+
   const submitSms = useCallback(async () => {
     const code = smsCode.replace(/\D/g, '');
     if (code.length < 4) { setSmsErr('请输入手机收到的验证码'); return; }
@@ -527,13 +558,19 @@ export default function AccountsPage() {
             ) : qr.state === 'success' ? (
               <div style={{ fontSize: 48, padding: 40 }}>✅</div>
             ) : ['error', 'expired'].includes(qr.state) ? (
-              <div style={{ fontSize: 13, color: 'var(--red)', padding: 30 }}>
-                {qr.message || '登录失败'}<br />请根据上方具体原因排查；可关闭后重试，日志在 outputs/_login/。
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', padding: 24 }}>
+                登录任务异常不代表账号一定未登录。如果官网已经登录，可核验现有登录态，无需重复扫码。<br />
+                排查日志：outputs/_login/。
               </div>
             ) : (
               <div className="loading" style={{ padding: 40 }}><div className="spinner" />准备二维码…</div>
             )}
-            <div style={{ marginTop: 16 }}>
+            <div style={{ marginTop: 16, display: 'flex', justifyContent: 'center', gap: 8 }}>
+              {['error', 'expired'].includes(qr.state) && (
+                <button className="btn btn-primary" disabled={busy === qr.platform + ':verify'} onClick={recheckLogin}>
+                  {busy === qr.platform + ':verify' ? '正在核验…' : '已登录？重新核验'}
+                </button>
+              )}
               <button className="btn" onClick={closeQr}>{qr.state === 'success' ? '完成' : '关闭'}</button>
             </div>
           </div>

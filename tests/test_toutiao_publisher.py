@@ -227,9 +227,7 @@ def test_backend_confirmation_rejects_intermediate_redirect(monkeypatch):
         binding = False
 
         def goto(self, url, **kwargs):
-            assert url == tp.HOME_URL
-            self.url = url
-            self.binding = True
+            raise AssertionError('intermediate confirmation must not navigate')
 
         def wait_for_timeout(self, ms):
             assert ms >= 2000
@@ -237,7 +235,7 @@ def test_backend_confirmation_rejects_intermediate_redirect(monkeypatch):
     page = RedirectPage()
     monkeypatch.setattr(tp, "_needs_phone_binding", lambda p: p.binding)
     assert not tp._backend_authenticated(page)
-    assert page.binding
+    assert page.url == 'https://mp.toutiao.com/intermediate'
 
 
 def test_whoami_prints_single_json_line(monkeypatch, capsys):

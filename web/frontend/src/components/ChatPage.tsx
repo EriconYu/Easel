@@ -199,6 +199,7 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
   );
 
   const projectBar = <div className="workbench-meta" style={{padding:'8px 20px'}}>
+    <div>此对话身份：{session.persona || '通用模式'} · 不随顶部工作画像切换。</div>
     {projectTitle ? <>内容项目：{projectTitle} <button onClick={() => { void onBackProject?.().catch(e => setProjectError(String(e.message || e))); }}>返回内容项目</button> · 对话结束后在项目里取回正文、审核并另存版本。</> : '自由对话：不会自动建立内容项目或保存正式稿件。正式创作请从灵感或热点进入内容项目。'}
     {projectError && <p role="alert">{projectError}</p>}
   </div>;
