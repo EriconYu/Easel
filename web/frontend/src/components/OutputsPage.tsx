@@ -243,14 +243,17 @@ export default function OutputsPage({ jumpPath, onJumpHandled }: OutputsPageProp
           <h1 className="page-title">内容库</h1>
           {stack.length > 0 && <nav className="gallery-breadcrumb" aria-label="内容库路径">
             <button className="crumb" onClick={() => goTo(0)}>内容库</button>
-            {stack.map((name, i) => (
-              <span key={i}>
-                <span className="crumb-sep">/</span>
-                {i === stack.length - 1
-                  ? (projectMeta?.title && i === 0 ? projectMeta.title : name)
-                  : <button className="crumb" onClick={() => goTo(i + 1)}>{name}</button>}
-              </span>
-            ))}
+            {stack.map((name, i) => {
+              const label = i === 0 ? projectMeta?.title || name : name;
+              return (
+                <span key={i}>
+                  <span className="crumb-sep">/</span>
+                  {i === stack.length - 1
+                    ? label
+                    : <button className="crumb" onClick={() => goTo(i + 1)}>{label}</button>}
+                </span>
+              );
+            })}
           </nav>}
           <p className="page-subtitle">
             {atTop

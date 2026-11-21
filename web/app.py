@@ -1258,10 +1258,45 @@ def _read_project_meta(proj: Path) -> dict:
     return meta
 
 
+_TOPIC_FOLDER = re.compile(r'主题-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})')
+
+
+def _topic_project_titles(output_dir: Path, task_ids: set[str]) -> dict[str, str]:
+    """从工作台记录补齐旧主题文件夹的展示名称。"""
+    store = output_dir / '_workbench'
+    if not task_ids or store.is_symlink() or not store.is_dir():
+        return {}
+
+    task_titles: dict[str, str] = {}
+    recommendation_titles: dict[str, str] = {}
+    for state in store.glob('*/state.json'):
+        if state.is_symlink() or state.parent.is_symlink() or not state.is_file():
+            continue
+        try:
+            data = json.loads(state.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        recommendations = data.get('recommendations')
+        cards = recommendations.get('cards') if isinstance(recommendations, dict) else None
+        for records, titles in ((data.get('tasks'), task_titles), (cards, recommendation_titles)):
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                task_id, title = record.get('task_id'), record.get('title')
+                if isinstance(task_id, str) and task_id in task_ids and isinstance(title, str) and title.strip():
+                    titles[task_id] = title.strip()
+    return {**recommendation_titles, **task_titles}
+
+
 def get_output_tree() -> list[dict]:
     if not OUTPUTS_DIR.is_dir():
         return []
     items = []
+    untitled_topics = []
     for e in sorted(OUTPUTS_DIR.iterdir()):
         # 内容库只展示「项目目录」：跳过系统目录(_login/_publish/...)、隐藏项、
         # 以及根目录散文件（按新规约产物必在项目目录内，根散文件=系统状态/残渣）。
@@ -1273,7 +1308,13 @@ def get_output_tree() -> list[dict]:
         meta = _read_project_meta(e)
         if meta:
             node['meta'] = meta
+        topic = _TOPIC_FOLDER.fullmatch(e.name)
+        if topic and not meta.get('title'):
+            untitled_topics.append((topic[1], node))
         items.append(node)
+    titles = _topic_project_titles(OUTPUTS_DIR, {task_id for task_id, _ in untitled_topics})
+    for task_id, node in untitled_topics:
+        node.setdefault('meta', {})['title'] = titles.get(task_id, '未命名项目')
     # 按最后修改时间倒序：最近产物排最前（供工作台「最近产物」与内容库时间排序）
     return sorted(items, key=lambda x: x.get('mtime', 0), reverse=True)
 

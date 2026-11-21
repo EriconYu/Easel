@@ -482,6 +482,31 @@ def test_output_tree_relative_paths(tmp_path, monkeypatch):
     assert kinds["note.md"] == "text" and kinds["card.png"] == "image"
 
 
+def test_existing_topic_folders_use_project_titles_without_changing_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(web, "OUTPUTS_DIR", tmp_path)
+    ids = [f"00000000-0000-0000-0000-{index:012d}" for index in range(4)]
+    folders = [tmp_path / f"主题-{task_id}" for task_id in ids]
+    for folder in folders:
+        folder.mkdir()
+        (folder / "稿件.md").write_text("正文", encoding="utf-8")
+    (folders[2] / ".easel.json").write_text('{"title":"手动命名"}', encoding="utf-8")
+    state = tmp_path / "_workbench" / "作者" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({
+        "tasks": [{"task_id": ids[0], "title": "项目名称"}, {"task_id": ids[2], "title": "工作台标题"}],
+        "recommendations": {"cards": [
+            {"task_id": ids[0], "title": "旧选题名称"}, {"task_id": ids[1], "title": "推荐选题名称"},
+        ]},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    nodes = {node["path"]: node for node in web.api_outputs()}
+    assert [nodes[folder.name]["meta"]["title"] for folder in folders] == [
+        "项目名称", "推荐选题名称", "手动命名", "未命名项目",
+    ]
+    for folder in folders:
+        assert nodes[folder.name]["children"][0]["path"] == f"{folder.name}/稿件.md"
+
+
 # ---- Web: SSE 断线恢复必须绑定到当前 turn ----
 
 def test_last_turn_rejects_stale_turn(tmp_path, monkeypatch):
