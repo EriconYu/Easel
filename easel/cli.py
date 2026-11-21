@@ -275,6 +275,28 @@ def cmd_web(args) -> int:
         print(f"{RED}未找到 web/app.py{NC} — 安装可能不完整，请重跑 `bash setup.sh`。",
               file=sys.stderr)
         return 1
+    if getattr(args, "daemon", False):
+        log_path = PROJECT_ROOT / "logs" / f"easel-web-{port}.log"
+        try:
+            log_path.parent.mkdir(exist_ok=True)
+            with log_path.open("ab") as log:
+                process = subprocess.Popen(
+                    [sys.executable, "-u", str(script)], cwd=PROJECT_ROOT, env=env,
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+        except OSError as error:
+            print(f"无法启动后台工作台：{error}", file=sys.stderr)
+            return 1
+        try:
+            exit_code = process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            print(f"后台工作台 PID {process.pid}（可用 kill {process.pid} 停止）")
+            print(f"日志位于 {log_path}")
+            return 0
+        print(f"后台工作台启动失败（退出码 {exit_code}），请查看日志 {log_path}", file=sys.stderr)
+        return exit_code if exit_code > 0 else 1
+
     # 透传子进程返回码：端口占用/依赖缺失导致 app.py 立刻退出时，调用方
     # （自启/CI/脚本）能据此判断启动是否成功，而非恒拿到 0。
     result = subprocess.run(
@@ -320,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     # web
     p_web = sub.add_parser("web", help="启动 Web UI")
     p_web.add_argument("--port", type=int, default=7860, help="端口（默认 7860）")
+    p_web.add_argument("--daemon", action="store_true", help="在后台启动工作台，输出 PID 和日志路径")
     p_web.set_defaults(func=cmd_web)
 
     args = parser.parse_args(argv)
