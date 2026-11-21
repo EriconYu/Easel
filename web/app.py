@@ -2692,6 +2692,10 @@ _FETCH_KEY_BY_SLOT = {
     'siliconflow': ('SILICONFLOW_BASE_URL', 'SILICONFLOW_API_KEY'),
 }
 
+# 部分中转站会拦截 urllib 默认的 Python-urllib 标识（403 / error code 1010）。
+# 模型发现请求使用明确的应用标识，与浏览器无关。
+_MODEL_DISCOVERY_HEADERS = {"User-Agent": "Easel/0.3", "Accept": "application/json"}
+
 
 @app.post("/api/settings/models/available")
 async def api_models_available(req: ModelsFetchRequest):
@@ -2743,7 +2747,7 @@ async def api_models_available(req: ModelsFetchRequest):
     _opener = urllib.request.build_opener(*handlers)
 
     def _fetch() -> list[str]:
-        rq = urllib.request.Request(url, headers=headers)
+        rq = urllib.request.Request(url, headers={**_MODEL_DISCOVERY_HEADERS, **headers})
         with _opener.open(rq, timeout=15) as resp:
             payload = json.loads(resp.read().decode("utf-8", "replace"))
         # OpenAI / Anthropic 形状都是 {"data":[{"id":...}]}；有的网关直接给 ["id",...]。
@@ -2818,12 +2822,15 @@ async def api_models_selftest(req: SelftestRequest):
                 # OpenAI 风格的中转站（它们只认 Bearer）。
                 url = base + "/v1/models"
                 rq = urllib.request.Request(url, headers={
+                    **_MODEL_DISCOVERY_HEADERS,
                     "x-api-key": key,
                     "anthropic-version": "2023-06-01",
                     "Authorization": f"Bearer {key}",
                 })
             else:
-                headers = {"Authorization": f"Bearer {key}"} if key else {}
+                headers = {**_MODEL_DISCOVERY_HEADERS}
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
                 rq = urllib.request.Request(base + "/models", headers=headers)
             opener = _opener
             if slot == "direct-api" and base == env.get("EASEL_DIRECT_API_BASE_URL", "").strip().rstrip("/"):

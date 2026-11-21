@@ -79,7 +79,15 @@ export function saveWorkbenchVersion(persona: string, task_id: string, name: str
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   // 全部是动态应用接口（登录态/数据等），禁止浏览器 HTTP 缓存——否则 /api/accounts 等可能被启发式
   // 缓存住旧响应（曾表现为“扫码登录后卡片仍显示未登录”）。调用方可用 options.cache 覆盖。
-  const res = await fetch(`${BASE}${url}`, { cache: 'no-store', ...options });
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${url}`, { cache: 'no-store', ...options });
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error('无法连接工作台服务，请确认本地服务正在运行后重试');
+    }
+    throw error;
+  }
   if (!res.ok) {
     // 优先显示后端返回的实质错误信息（FastAPI 的 {detail}），而不是无意义的 "API error: 400"
     let detail = '';
