@@ -1,0 +1,25 @@
+.content-delete-dialog {
+  width: min(500px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  margin: auto;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+.content-delete-dialog[open] { display: grid; gap: 12px; }
+.content-delete-dialog::backdrop { background: rgb(12 16 25 / 60%); }
+.content-delete-dialog h2 { font-size: 19px; line-height: 1.4; }
+.content-delete-dialog p { font-size: 13px; color: var(--text-secondary); }
+.content-delete-dialog .content-delete-name { font-size: 15px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.content-delete-assets { padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.content-delete-assets label { display: flex; align-items: center; gap: 9px; min-height: 28px; font-size: 14px; font-weight: 600; cursor: pointer; }
+.content-delete-assets input { width: 16px; height: 16px; flex: none; accent-color: var(--red); }
+.content-delete-assets ul { max-height: 132px; overflow: auto; margin: 8px 0 4px; padding-left: 18px; color: var(--text); font-size: 13px; overflow-wrap: anywhere; }
+.content-delete-dialog :is(.content-delete-warning, .content-delete-error) { color: var(--red); }
+.content-delete-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.content-delete-dialog .content-delete-confirm { border-color: #b91c1c; background: #b91c1c; color: white; }
+.content-delete-dialog .content-delete-confirm:not(:disabled):hover { border-color: #991b1b; background: #991b1b; color: white; }
+.content-delete-dialog :focus-visible { outline: 2px solid var(--accent-start); outline-offset: 3px; }

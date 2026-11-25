@@ -7,11 +7,17 @@ test('人工审核冻结载荷，标签修改立即失效，预检与导出一�
  h.store.savePublishDraft(d,'甲');await h.flush();
  h.input('掘金人工审核').props.onChange({target:{checked:true}});h.render();
  assert.equal(h.button('导出稿件和素材 ZIP').props.disabled,false);
+ h.button('编辑此平台版本').props.onClick();
+ h.input('掘金文章标题').props.onChange({target:{value:'掘金专用标题'}});
+ h.button('完成编辑').props.onClick();
+ assert.equal(h.button('导出稿件和素材 ZIP').props.disabled,true);
+ h.input('掘金人工审核').props.onChange({target:{checked:true}});
  h.input('manual-tags').props.onChange({target:{value:'新标签'}});
  assert.equal(h.button('导出稿件和素材 ZIP').props.disabled,true);
  h.input('掘金人工审核').props.onChange({target:{checked:true}});h.render();
  await h.button('AI 辅助检查').props.onClick();
  await h.button('导出稿件和素材 ZIP').props.onClick();
  const payload=h.calls.find(c=>c[0]==='export')[2];assert.equal(payload.body,'最终人工正文');assert.equal(payload.tags,'新标签');
+ assert.equal(payload.title, '掘金专用标题');
  assert.ok(h.calls.filter(c=>['general','persona'].includes(c[0])).every(([,prompt])=>prompt.includes('最终人工正文')&&prompt.includes('新标签')));
 });

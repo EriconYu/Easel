@@ -17,8 +17,8 @@ import BreakdownPage from './components/BreakdownPage';
 import SubNav from './components/SubNav';
 import OnboardingWizard from './components/OnboardingWizard';
 import SettingsPanel from './components/SettingsPanel';
-import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat } from './lib/api';
-import type { PersonaItem, UploadedFile, ChatQuestion } from './lib/api';
+import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat, saveChatVersion, fetchWorkbenchVersions } from './lib/api';
+import type { PersonaItem, UploadedFile, ChatQuestion, ScheduleItem } from './lib/api';
 import { availablePersona, parsePersonas, loadWorkingPersona, saveWorkingPersona } from './lib/personas';
 import { questionStatus } from './lib/api';
 import { deleteSession as deleteRemoteSession } from './lib/api';
@@ -31,6 +31,7 @@ import {
   saveActiveId,
 } from './lib/store';
 import type { ChatSession, ChatMessage, StreamState } from './lib/store';
+import { splitArticleHeading, withoutRepeatedArticleHeading } from './lib/article';
 
 const ONBOARDING_SEEN_KEY = 'easel_onboarding_seen';
 
@@ -85,10 +86,10 @@ export default function App() {
   const [showRecommend, setShowRecommend] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [projectFocus, setProjectFocus] = useState<{persona:string;taskId:string} | null>(null);
+  const [projectFocus, setProjectFocus] = useState<{persona:string;taskId:string;versionId?:string} | null>(null);
   const projectId = projectFocus?.persona === selectedPersona ? projectFocus.taskId : '';
   const [projectDraft, setProjectDraft] = useState<ProjectPublishDraft | undefined>();
-  const [chatProject, setChatProject] = useState<WorkbenchTask | null>(null);
+  const [chatLink, setChatLink] = useState<{sessionId: string; task: WorkbenchTask | null} | null>(null);
   // 装完还没配模型时，首开要把用户直接带到模型设置页（安装脚本不再在终端问 Key）
   const [needModelSetup, setNeedModelSetup] = useState(false);
   const [sessionSaveError, setSessionSaveError] = useState(false);
@@ -249,13 +250,12 @@ export default function App() {
   }, [refreshPersonas]);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
+  const chatProject = chatLink?.sessionId === activeSessionId ? chatLink?.task : null;
   useEffect(() => {
     let alive = true;
-    setChatProject(null);
-    const persona = activeSession?.persona;
-    if (currentPage === 'chat' && persona && activeSessionId) {
-      fetchWorkbench(persona).then(data => {
-        if (alive) setChatProject(data.tasks.find(t => t.session_id === activeSessionId) || null);
+    if (currentPage === 'chat' && activeSessionId) {
+      fetchWorkbench(activeSession?.persona || '').then(data => {
+        if (alive) setChatLink({sessionId: activeSessionId, task: data.tasks.find(t => t.session_id === activeSessionId) || null});
       }).catch(() => {});
     }
     return () => { alive = false; };
@@ -340,7 +340,7 @@ export default function App() {
   }, []);
 
   const finalizeStream = useCallback((sessionId: string, owner: typeof streamAcc.current[string],
-    sessionKey?: string, error?: Error) => {
+    sessionKey?: string, error?: Error, turnId?: string, cleanEnd?: boolean) => {
     if (streamAcc.current[sessionId] !== owner || finalizers.current.has(sessionId)) return;
     const pending: { owner: object; finish: () => void; timer?: ReturnType<typeof setTimeout> } = {
       owner,
@@ -351,6 +351,7 @@ export default function App() {
         flushTyping(sessionId);
         appendAssistant(sessionId, {
           role: 'assistant', content: owner.content + (error ? `\n\nError: ${error.message}` : ''),
+          turnId, incomplete: error !== undefined || cleanEnd === false,
           thinking: owner.thinking || undefined, activity: owner.steps.join('\n') || undefined,
           questions: owner.questions.length ? [...owner.questions] : undefined,
         }, sessionKey);
@@ -433,13 +434,13 @@ export default function App() {
         typingBuf.current[sessionId] = (typingBuf.current[sessionId] || '') + chunk;
         ensureTypingPump(sessionId);
       },
-      (sessionKey) => {
+      (sessionKey, cleanEnd) => {
         // done 不能立即 flush——token 和 done 几乎同时到达（OpenClaw 攒批），
         // 立即 flush 会把整包瞬间冲出，打字机白做。等队列吐完再落盘。
-        finalizeStream(sessionId, owner, sessionKey);
+        finalizeStream(sessionId, owner, sessionKey, undefined, turnId, cleanEnd);
       },
       (err) => {
-        finalizeStream(sessionId, owner, undefined, err);
+        finalizeStream(sessionId, owner, undefined, err, turnId);
       },
       (thinkChunk) => {
         const a = streamAcc.current[sessionId]; if (a !== owner) return;
@@ -491,11 +492,13 @@ export default function App() {
     if (!turnId) {
       void fetchLastTurn(sessionId).then((r) => {
         if (streamAcc.current[sessionId] !== owner) return;
-        if (r.status === 'done') appendAssistant(sessionId, { role: 'assistant', content: r.text || '（无输出）' });
+        if (r.status === 'done') appendAssistant(sessionId, { role: 'assistant', content: r.text || '（无输出）',
+          turnId: r.turn_id, incomplete: !r.text || r.clean_end === false || r.stop_reason === 'error' });
         clearStream(sessionId);
       }).catch(() => { if (streamAcc.current[sessionId] === owner) clearStream(sessionId); });
       return;
     }
+    const resumeTurnId = turnId;
     streamCtl.current[sessionId] = streamChat(
       '', undefined, sessionId,
       (chunk) => {
@@ -503,11 +506,11 @@ export default function App() {
         typingBuf.current[sessionId] = (typingBuf.current[sessionId] || '') + chunk;
         ensureTypingPump(sessionId);
       },
-      (sessionKey) => {
-        finalizeStream(sessionId, owner, sessionKey);
+      (sessionKey, cleanEnd) => {
+        finalizeStream(sessionId, owner, sessionKey, undefined, resumeTurnId, cleanEnd);
       },
       (err) => {
-        finalizeStream(sessionId, owner, undefined, err);
+        finalizeStream(sessionId, owner, undefined, err, resumeTurnId);
       },
       (chunk) => { const a = streamAcc.current[sessionId]; if (a === owner) a.thinking = (a.thinking + chunk).slice(-4000); },
       (status) => {
@@ -525,11 +528,13 @@ export default function App() {
         void fetchLastTurn(sessionId, turnId).then((r) => {
           if (streamAcc.current[sessionId] !== owner) return;
           if (r.status === 'done') {
-            appendAssistant(sessionId, { role: 'assistant', content: r.text || '（无输出）' });
+            appendAssistant(sessionId, { role: 'assistant', content: r.text || '（无输出）',
+              turnId: r.turn_id, incomplete: !r.text || r.clean_end === false || r.stop_reason === 'error' });
           } else {
             appendAssistant(sessionId, {
               role: 'assistant',
               content: '上一轮任务记录已失效，无法继续恢复。请重新发送上一条消息。',
+              incomplete: true,
             });
           }
           clearStream(sessionId);
@@ -538,6 +543,7 @@ export default function App() {
           if (streamAcc.current[sessionId] !== owner) return;
           appendAssistant(sessionId, {
             role: 'assistant', content: '上一轮任务记录已失效，请重新发送上一条消息。',
+            incomplete: true,
           });
           clearStream(sessionId);
         });
@@ -615,13 +621,62 @@ export default function App() {
     setCurrentPage('outputs');
   }, [selectedPersona]);
 
-  const handleOpenLinkedProject = useCallback(async (persona: string, taskId: string) => {
-    await saveWorkbenchTask(persona, {task_id: taskId});
+  const handleOpenLinkedProject = useCallback(async (persona: string, taskId: string, versionId?: string) => {
     setSelectedPersona(persona);
     setOutputsJump('');
-    setProjectFocus({persona, taskId});
+    setProjectFocus({persona, taskId, versionId});
     setCurrentPage('outputs');
   }, []);
+
+  const handleSaveChatReply = async (session: ChatSession, reply: ChatMessage, index: number, title: string, text: string, articleTitle: string) => {
+    const persona = session.persona || '';
+    const {task, version} = await saveChatVersion({
+      persona, session_id: session.id, reply_id: reply.turnId || `legacy-${index}`, turn_id: reply.turnId, title, text, article_title: articleTitle,
+    });
+    setChatLink({sessionId: session.id, task});
+    await handleOpenLinkedProject(persona, task.task_id, version.id);
+  };
+
+  const openScheduledDraft = async (item: ScheduleItem) => {
+    const persona = item.draft_content?.persona ?? item.persona ?? '';
+    const legacyBody = item.status === 'draft' ? item.note : '';
+    const linked = item.task_id && item.version_id;
+    const [version, project] = linked ? await Promise.all([
+      fetchWorkbenchVersions(persona, item.task_id!).then(result => result.items.find(version => version.id === item.version_id)),
+      fetchWorkbench(persona).then(result => result.tasks.find(task => task.task_id === item.task_id)),
+    ]).catch(error => {
+      if (!item.draft_content?.body && !legacyBody.trim()) throw error;
+      return [undefined, undefined] as const;
+    }) : [undefined, undefined] as const;
+    const sourceText = item.draft_content?.body ?? (legacyBody.trim() ? legacyBody : version?.text ?? '');
+    if (!sourceText.trim()) throw new Error('这条排期没有可打开的正文，请先关联稿件版本。');
+    const sourceTitle = version?.article_title ?? (version && splitArticleHeading(version.text).title);
+    const title = sourceTitle && (item.title === project?.title || item.title === '未填写文章标题')
+      ? sourceTitle : item.title;
+    setSelectedPersona(persona);
+    setProjectDraft({
+      persona, task_id: item.task_id || '', version_id: item.version_id || '',
+      versionName: version?.name || '日历稿件', title,
+      text: withoutRepeatedArticleHeading(sourceText, title), platform: item.platform,
+      scheduleId: item.id, tags: item.draft_content?.tags, media: item.draft_content?.media,
+      theme: item.draft_content?.theme,
+    });
+    setCurrentPage('publish');
+  };
+
+  const handleOpenProjectChat = useCallback((task: WorkbenchTask) => {
+    if (!task.session_id) return;
+    if (!sessionsRef.current.some(session => session.id === task.session_id)) {
+      const session = {id: task.session_id, persona: selectedPersona, title: '项目讨论', messages: [], created: Date.now()};
+      const next = [session, ...sessionsRef.current];
+      sessionsRef.current = next;
+      setSessions(next);
+      saveSessions(next);
+    }
+    setChatLink({sessionId: task.session_id, task});
+    setActiveSessionId(task.session_id);
+    setCurrentPage('chat');
+  }, [selectedPersona]);
 
   const handleGenerateWorkbench = useCallback(async (
     card: Pick<WorkbenchCard, 'task_id' | 'title'>, format: WorkbenchFormat, platforms: string[],
@@ -632,8 +687,8 @@ export default function App() {
     const existing = sessionId ? sessionsRef.current.find(session => session.id === sessionId) : undefined;
     // 本地记录缺失时仍沿用服务端 ID，让模型继续读取同一会话历史。
     const ns: ChatSession = existing || (sessionId ? {
-      id: sessionId, persona: selectedPersona, title: card.title, messages: [], created: Date.now(),
-    } : createSession(selectedPersona || undefined));
+      id: sessionId, persona: selectedPersona, title: '项目讨论', messages: [], created: Date.now(),
+    } : {...createSession(selectedPersona || undefined), title: '项目讨论'});
     if (streamCtl.current[ns.id] || streamAcc.current[ns.id]) {
       setActiveSessionId(ns.id);
       setCurrentPage('chat');
@@ -664,6 +719,7 @@ export default function App() {
       appendAssistant(sessionId, {
         role: 'assistant',
         content: (a.content || '') + '\n\n_（已停止）_',
+        incomplete: true,
         thinking: a.thinking || undefined,
         activity: a.steps.join('\n') || undefined,
         questions: a.questions.length ? [...a.questions] : undefined,
@@ -826,7 +882,8 @@ export default function App() {
         return activeSession ? (
           <ChatPage
             projectTitle={chatProject?.title}
-            onBackProject={chatProject && activeSession.persona ? () => handleOpenLinkedProject(activeSession.persona!, chatProject.task_id) : undefined}
+            onBackProject={chatProject ? () => handleOpenLinkedProject(activeSession.persona || '', chatProject.task_id) : undefined}
+            onSaveReply={(reply, index, title, text, articleTitle) => handleSaveChatReply(activeSession, reply, index, title, text, articleTitle)}
             apiDirect={apiDirect}
             key={`${activeSession.persona || ''}:${activeSession.id}`}
             session={activeSession}
@@ -863,15 +920,21 @@ export default function App() {
       case 'ideas':
         return <IdeasPage persona={selectedPersona} onOpenProject={handleOpenProject} />;
       case 'calendar':
-        return <CalendarPage onOpenProject={handleOpenLinkedProject} />;
+        return <CalendarPage onOpenProject={handleOpenLinkedProject} onOpenDraft={openScheduledDraft} />;
       case 'publish':
-        return <PublishPage persona={selectedPersona} projectDraft={projectDraft} />;
+        return <PublishPage persona={selectedPersona} projectDraft={projectDraft}
+          onProjectDraftHandled={handled => setProjectDraft(current => current === handled ? undefined : current)} />;
       case 'breakdown':
         return <BreakdownPage persona={selectedPersona} />;
       case 'skills':
         return <SkillPage persona={selectedPersona} />;
       case 'outputs':
         return <ContentWorkspace persona={selectedPersona} projectId={projectId} onOpenProject={handleOpenProject}
+          onProjectDeleted={taskId => {
+            setProjectFocus(current => current?.persona === selectedPersona && current.taskId === taskId ? null : current);
+            setProjectDraft(current => current?.persona === selectedPersona && current.task_id === taskId ? undefined : current);
+          }}
+          openedVersionId={projectId ? projectFocus?.versionId : undefined} onOpenProjectChat={handleOpenProjectChat}
           onGenerateWorkbench={handleGenerateWorkbench} onNavigate={setCurrentPage}
           jumpPath={outputsJump} onJumpHandled={clearOutputsJump}
           onPreparePublish={draft => { setProjectDraft(draft); setCurrentPage('publish'); }} />;

@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import type { CSSProperties } from 'react';
-import { fetchOutputs, fetchOutputContent, mediaUrl, deleteOutput } from '../lib/api';
-import type { OutputNode, OutputMeta } from '../lib/api';
+import { fetchOutputs, fetchOutputContent, mediaUrl } from '../lib/api';
+import type { ContentDeletionResult, OutputNode, OutputMeta } from '../lib/api';
+import ContentDeleteDialog from './ContentDeleteDialog';
 import { renderMarkdown } from '../lib/sanitize';
 import { IconOutputs, IconImage, IconVideo, IconMusic, IconFile, IconFolder, IconRefresh, IconChevron, IconTrash } from './icons';
 
@@ -87,6 +88,8 @@ export default function OutputsPage({ jumpPath, onJumpHandled }: OutputsPageProp
   const [stack, setStack] = useState<string[]>([]);   // 当前所在的文件夹名称路径
   const [filter, setFilter] = useState('all');
   const [selected, setSelected] = useState<OutputNode | null>(null);
+  const [deleting, setDeleting] = useState<OutputNode | null>(null);
+  const [deletionNotice, setDeletionNotice] = useState('');
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
   const reqSeq = useRef(0);
@@ -126,19 +129,18 @@ export default function OutputsPage({ jumpPath, onJumpHandled }: OutputsPageProp
   const enterDir = useCallback((name: string) => { setStack((s) => [...s, name]); setFilter('all'); }, []);
   const goTo = useCallback((depth: number) => { setStack((s) => s.slice(0, depth)); setFilter('all'); }, []);
 
-  const remove = useCallback(async (node: OutputNode, e: React.MouseEvent) => {
+  const remove = (node: OutputNode, e: React.MouseEvent) => {
     e.stopPropagation();
-    const isDir = node.type === 'dir';
-    const label = isDir ? `项目/文件夹「${node.meta?.title || node.name}」及其全部内容` : `文件「${node.name}」`;
-    if (!window.confirm(`确定删除${label}？\n此操作不可恢复。`)) return;
-    try {
-      await deleteOutput(node.path);
-      setSelected((cur) => (cur?.path === node.path ? null : cur));
-      load();
-    } catch (err) {
-      alert((err as Error).message || '删除失败');
-    }
-  }, [load]);
+    setDeletionNotice('');
+    setDeleting(node);
+  };
+  const deletionPath = deleting?.path || '';
+  const finishRemoval = (result: ContentDeletionResult) => {
+    setSelected(current => current?.path === deletionPath ? null : current);
+    setDeleting(null);
+    setDeletionNotice(result.retained_assets ? '成品已删除，关联素材已保留。' : '已删除。');
+    load();
+  };
 
   const open = useCallback(async (f: OutputNode) => {
     const seq = ++reqSeq.current;
@@ -204,7 +206,8 @@ export default function OutputsPage({ jumpPath, onJumpHandled }: OutputsPageProp
       <div key={d.path} className="card card-hover gcard" onClick={() => enterDir(d.name)}>
         <div className="gcard-thumb">
           <span className="gcard-kind">{m?.kind ? (KIND_LABEL[m.kind] || m.kind) : '文件夹'}</span>
-          <button className="gcard-del" title="删除" onClick={(e) => remove(d, e)}><IconTrash size={14} /></button>
+          <button className="gcard-del" title="删除文件夹" aria-label={`删除文件夹 ${m?.title || d.name}`}
+            onClick={(e) => remove(d, e)}><IconTrash size={14} /></button>
           {cover ? <Thumb f={cover} big /> : <div className="gcard-ph"><IconFolder size={38} /></div>}
         </div>
         <div className="gcard-meta">
@@ -225,7 +228,7 @@ export default function OutputsPage({ jumpPath, onJumpHandled }: OutputsPageProp
     <div key={f.path} className="card card-hover gcard" onClick={() => open(f)}>
       <div className="gcard-thumb">
         <span className="gcard-kind">{kindLabel(f)}</span>
-        <button className="gcard-del" title="删除" onClick={(e) => remove(f, e)}><IconTrash size={14} /></button>
+        <button className="gcard-del" title="删除文件" aria-label={`删除文件 ${f.name}`} onClick={(e) => remove(f, e)}><IconTrash size={14} /></button>
         <Thumb f={f} />
       </div>
       <div className="gcard-meta">
@@ -321,6 +324,10 @@ export default function OutputsPage({ jumpPath, onJumpHandled }: OutputsPageProp
         </div>
       )}
 
+      {deletionNotice && <p className="content-library-notice" role="status">{deletionNotice}</p>}
+      {deleting && <ContentDeleteDialog name={deleting.meta?.title || deleting.name}
+        kind={deleting.type === 'dir' ? '文件夹' : '文件'} path={deletionPath}
+        onDeleted={finishRemoval} onClose={() => setDeleting(null)} />}
       {selected && (
         <div className="drawer-overlay" onClick={() => setSelected(null)}>
           <div className="drawer" onClick={(e) => e.stopPropagation()}>

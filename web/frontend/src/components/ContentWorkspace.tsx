@@ -1,23 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
 import { canonicalPlatform, fetchWorkbench, saveWorkbenchTask, fetchWorkbenchVersions, createSchedule, fetchSchedule } from '../lib/api';
+import type { ContentDeletionResult } from '../lib/api';
 import type { WorkbenchCard, WorkbenchFormat, WorkbenchTask, WorkbenchVersion, ScheduleInput, ScheduleItem } from '../lib/api';
 import type { Page } from './Sidebar';
+import { splitArticleHeading, withoutRepeatedArticleHeading } from '../lib/article';
+import type { ProjectPublishDraft } from './ProjectPublishSource';
 import { DiscussionEditor } from './WorkbenchDiscussion';
 import OutputsPage from './OutputsPage';
+import ContentDeleteDialog from './ContentDeleteDialog';
 import './WorkbenchPanel.css';
 import './ContentWorkspace.css';
 
 export interface ContentWorkspaceProps {
   persona: string;
   projectId?: string;
+  openedVersionId?: string;
+  onOpenProjectChat?: (task: WorkbenchTask) => void;
   onOpenProject: (taskId: string) => Promise<void>;
+  onProjectDeleted?: (taskId: string) => void;
   onGenerateWorkbench: (card: Pick<WorkbenchCard, 'task_id' | 'title'>, format: WorkbenchFormat, platforms: string[]) => Promise<void>;
   onNavigate: (page: Page) => void;
   jumpPath?: string;
   /** Repeated file jumps can carry a new token even for the same path. */
   outputsJump?: {path: string; token: number};
   onJumpHandled?: () => void;
-  onPreparePublish?: (draft: {task_id: string; persona: string; version_id: string; title: string; text: string}) => void;
+  onPreparePublish?: (draft: ProjectPublishDraft) => void;
 }
 // Tasks already contain their source card on the server; no second project store.
 type ProjectTask = WorkbenchTask & {card?: WorkbenchCard};
@@ -33,6 +40,19 @@ const createProjectSchedule = createSchedule as (input: ProjectScheduleInput) =>
 const validDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)
   && Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 const validTime = (value: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
+const versionDate = new Intl.DateTimeFormat('sv-SE', {dateStyle: 'short', timeStyle: 'medium', hourCycle: 'h23'});
+function versionLabel(version: WorkbenchVersion) {
+  const timestamp = Date.parse(version.created_at);
+  return Number.isFinite(timestamp) ? `${version.name} · ${versionDate.format(timestamp)}` : version.name;
+}
+
+function publishArticle(version: WorkbenchVersion) {
+  if (version.article_title !== undefined) {
+    return {title: version.article_title, text: withoutRepeatedArticleHeading(version.text, version.article_title)};
+  }
+  const article = splitArticleHeading(version.text);
+  return {title: article.title, text: article.body};
+}
 
 export default function ContentWorkspace(props: ContentWorkspaceProps) {
   const {persona, projectId, outputsJump, onJumpHandled, onOpenProject} = props;
@@ -43,6 +63,8 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [deletionNotice, setDeletionNotice] = useState<{text: string; retainedPath: string} | null>(null);
+  const [retainedJump, setRetainedJump] = useState('');
   const scope = useRef(0);
 
   // Clearing a consumed file jump must not force the project tab back open.
@@ -52,9 +74,9 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
     const request = ++scope.current;
     setLoading(true);
     setError('');
-    if (!persona) { setSnapshot(null); setLoading(false); return; }
     fetchWorkbench(persona).then(data => {
-      if (scope.current === request) setSnapshot({persona, tasks: data.tasks});
+      if (scope.current === request) setSnapshot({persona, tasks: [...data.tasks].sort((a, b) =>
+        (b.updated_at || '').localeCompare(a.updated_at || ''))});
     }).catch(reason => {
       if (scope.current === request) { setSnapshot(null); setError(message(reason)); }
     }).finally(() => { if (scope.current === request) setLoading(false); });
@@ -72,51 +94,74 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
       if (scope.current === request) setSelectedId(taskId);
     } catch (reason) { if (scope.current === request) setError(message(reason)); }
   };
+  const onDeleted = (task: ProjectTask, result: ContentDeletionResult) => {
+    setSnapshot(current => current?.persona === persona ? {...current,
+      tasks: current.tasks.filter(item => item.task_id !== task.task_id)} : current);
+    setSelectedId('');
+    props.onProjectDeleted?.(task.task_id);
+    setDeletionNotice({text: result.retained_assets ? '项目已删除，关联素材已保留。' : '项目已删除。',
+      retainedPath: result.retained_assets ? `主题-${task.task_id}/assets` : ''});
+  };
 
   return <div className="page-scroll content-workspace">
     <header className="content-workspace-head">
-      <div><p className="content-workspace-eyebrow">CONTENT / 内容资产</p><h1 className="page-title">内容库</h1>
-        <p className="page-subtitle">一项选题，一个项目。讨论、依据与稿件版本始终归于同一任务。</p></div>
+      <div><h1 className="page-title">内容库</h1>
+        <p className="page-subtitle">查看创作项目里的稿件版本，或浏览生成的文件与素材。</p></div>
       <button className="btn btn-sm" onClick={() => props.onNavigate('calendar')}>查看排期</button>
     </header>
+    {deletionNotice && <div className="content-library-notice" role="status">
+      {deletionNotice.text}
+      {deletionNotice.retainedPath && <button className="btn btn-sm" onClick={() => {
+        setRetainedJump(deletionNotice.retainedPath);
+        setTab('files');
+      }}>查看保留素材</button>}
+    </div>}
     <div role="tablist" aria-label="内容库视图" className="content-workspace-tabs">
       <button role="tab" id="content-projects-tab" aria-controls="content-projects-panel" aria-selected={tab === 'projects'} onClick={() => setTab('projects')}>创作项目</button>
       <button role="tab" id="content-files-tab" aria-controls="content-files-panel" aria-selected={tab === 'files'} onClick={() => setTab('files')}>文件与素材</button>
     </div>
     <div role="tabpanel" id="content-projects-panel" aria-labelledby="content-projects-tab" hidden={tab !== 'projects'}>
-      <div className="content-project-toolbar"><p>当前画像：<strong>{persona || '未选择'}</strong> · {tasks.length} 个已有项目</p>
-        <button className="btn btn-sm" disabled={loading || !persona} onClick={() => setRevision(value => value + 1)}>刷新项目</button></div>
+      <div className="content-project-toolbar"><p>当前画像：<strong>{persona || '通用模式'}</strong> · {tasks.length} 个项目</p>
+        <button className="btn btn-sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>刷新项目</button></div>
       {error && <p className="workbench-error" role="alert">{error}</p>}
-      {!persona ? <p role="status">请先选择画像，再查看创作项目。</p> : loading && !snapshot ? <p role="status">正在读取创作项目…</p> : <div className="content-project-layout">
+      {loading && !snapshot ? <p role="status">正在读取创作项目…</p> : <div className="content-project-layout">
         <aside className="content-project-list" aria-label="已有创作项目">
           {tasks.map(task => <button key={task.task_id} className="content-project-item" aria-pressed={project?.task_id === task.task_id}
             onClick={() => void choose(task.task_id)}><strong>{task.title}</strong><span>{statusLabels[task.status]} · {task.task_id}</span></button>)}
-          {!tasks.length && !error && <p>暂无项目。请先在工作台把选题加入任务；这里不会另建稿件库。</p>}
+          {!tasks.length && !error && <p>暂无项目</p>}
         </aside>
         {project ? <ContentProject key={`${persona}:${project.task_id}`} {...props} task={project}
+          onDeleted={result => onDeleted(project, result)}
           onTaskSaved={saved => setSnapshot(current => current?.persona === persona ? {...current, tasks: current.tasks.map(item => item.task_id === saved.task_id ? saved : item)} : current)} />
           : id && !loading && !error ? <p role="alert" className="workbench-error">当前画像中未找到项目「{id}」，请返回工作台确认；不会跨画像查找。</p>
-          : !error && <p className="content-project-empty">从灵感收件箱或热点雷达选定内容，项目会出现在这里。</p>}
+          : !error && <p className="content-project-empty">可以从对话保存稿件，也可以从灵感或热点开始创作。 <button className="btn btn-sm" onClick={() => props.onNavigate('chat')}>前往对话</button></p>}
       </div>}
     </div>
     {tab === 'files' && <div role="tabpanel" id="content-files-panel" aria-labelledby="content-files-tab">
       <p className="content-files-note">原文件浏览：保留全部产物、素材及文件路径；文件夹不是另一套创作项目。</p>
-      <OutputsPage jumpPath={jumpPath} onJumpHandled={onJumpHandled} />
+      <OutputsPage jumpPath={retainedJump || jumpPath}
+        onJumpHandled={retainedJump ? () => setRetainedJump('') : onJumpHandled} />
     </div>}
   </div>;
 }
 
-function ContentProject({persona, task, onGenerateWorkbench, onNavigate, onPreparePublish, onTaskSaved}: ContentWorkspaceProps & {task: ProjectTask; onTaskSaved: (task: ProjectTask) => void}) {
+function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGenerateWorkbench, onNavigate, onPreparePublish, onTaskSaved, onDeleted}: ContentWorkspaceProps & {
+  task: ProjectTask; onTaskSaved: (task: ProjectTask) => void; onDeleted: (result: ContentDeletionResult) => void;
+}) {
   const [status, setStatus] = useState(task.status);
   const [target, setTarget] = useState(task.card?.platforms?.[0] || '通用');
   const [note, setNote] = useState(task.note || '');
+  const [projectName, setProjectName] = useState(task.title);
+  const [renaming, setRenaming] = useState(false);
+  const [savingName, setSavingName] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+  const [progressFeedback, setProgressFeedback] = useState<{kind: 'success' | 'error'; text: string} | null>(null);
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const [versions, setVersions] = useState<WorkbenchVersion[]>([]);
-  const [versionId, setVersionId] = useState('');
+  const [versionId, setVersionId] = useState(openedVersionId || '');
   const [versionsLoading, setVersionsLoading] = useState(true);
   const [versionError, setVersionError] = useState('');
   const [scheduleVersionId, setScheduleVersionId] = useState('');
@@ -144,12 +189,15 @@ function ContentProject({persona, task, onGenerateWorkbench, onNavigate, onPrepa
   };
   useEffect(() => { void refreshVersions(); return () => { ++versionRequest.current; }; }, [persona, task.task_id]);
   const selectedVersion = versions.find(version => version.id === versionId);
-  const preparePublish = () => {
-    if (!selectedVersion?.text.trim() || versionsLoading || !onPreparePublish) return;
-    setError(''); setNotice('');
+  const openedVersion = versions.find(version => version.id === openedVersionId);
+  const preparePublish = (version: WorkbenchVersion | undefined) => {
+    if (!version?.text.trim() || versionsLoading || !onPreparePublish) return;
+    setError('');
     try {
-      onPreparePublish({task_id: task.task_id, persona, version_id: selectedVersion.id, title: task.title, text: selectedVersion.text});
-      setNotice('所选版本已交给发布页审核；未执行真实发布，也未改变项目状态。');
+      onPreparePublish({
+        task_id: task.task_id, persona, version_id: version.id, versionName: version.name,
+        ...publishArticle(version), platform: target,
+      });
     } catch (reason) { setError(message(reason)); }
   };
   const scheduleVersion = versions.find(version => version.id === scheduleVersionId);
@@ -162,7 +210,7 @@ function ContentProject({persona, task, onGenerateWorkbench, onNavigate, onPrepa
     if (!saved || fields.some(field => field === 'platform' ? canonicalPlatform(saved.platform) !== canonicalPlatform(expected.platform) : saved[field] !== expected[field])) throw new Error('排期可能已写入，但读回核验未通过。请勿重复创建，先重新核验或查看日历确认。');
     if (active.current) {
       setPendingSchedule(null); setScheduleVersionId('');
-      setScheduleNotice(`排期已创建并核验：${saved.date} ${saved.time} · ${saved.platform} · 版本 ${saved.version_id}。未执行发布，项目状态未改变。`);
+      setScheduleNotice(`排期已创建并核验 · ${saved.date} ${saved.time} · ${saved.platform}`);
     }
   };
   const schedule = async () => {
@@ -170,7 +218,7 @@ function ContentProject({persona, task, onGenerateWorkbench, onNavigate, onPrepa
     scheduleLock.current = true; setScheduling(true); setScheduleError(''); setScheduleNotice('');
     try {
       const input: ProjectScheduleInput = {persona, task_id: task.task_id, version_id: scheduleVersion.id,
-        title: task.title, date, time, platform, status: 'scheduled', note: '', kind: 'content', source: 'manual', url: '', event_type: '', end_date: ''};
+        title: publishArticle(scheduleVersion).title || '未填写文章标题', date, time, platform, status: 'scheduled', note: '', kind: 'content', source: 'manual', url: '', event_type: '', end_date: ''};
       const created = await createProjectSchedule(input);
       const expected = {...input, id: created.id};
       if (active.current) setPendingSchedule(expected);
@@ -185,35 +233,113 @@ function ContentProject({persona, task, onGenerateWorkbench, onNavigate, onPrepa
     catch (reason) { if (active.current) setScheduleError(message(reason)); }
     finally { scheduleLock.current = false; if (active.current) setScheduling(false); }
   };
+  const renameProject = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const title = projectName.trim();
+    if (!title || savingName) return;
+    setSavingName(true);
+    setError('');
+    try {
+      const saved = await saveWorkbenchTask(persona, {task_id: task.task_id, title});
+      if (active.current) {
+        onTaskSaved(saved);
+        setRenaming(false);
+      }
+    } catch (reason) {
+      if (active.current) setError(message(reason));
+    } finally {
+      if (active.current) setSavingName(false);
+    }
+  };
   const saveMetadata = async () => {
     if (saving) return;
-    setError(''); setNotice('');
-    if (status === 'blocked' && !note.trim()) { setError('请填写阻塞备注'); return; }
+    setProgressFeedback(null);
+    if (status === 'blocked' && !note.trim()) {
+      setProgressFeedback({kind: 'error', text: '请填写阻塞备注'});
+      return;
+    }
     setSaving(true);
     try {
       await saveWorkbenchTask(persona, {task_id: task.task_id, status, note});
       const data = await fetchWorkbench(persona);
       const saved = data.tasks.find(item => item.task_id === task.task_id);
       if (!saved || saved.status !== status || (saved.note || '') !== note) throw new Error('保存后读回不一致，请刷新项目确认。');
-      if (active.current) { onTaskSaved(saved); setNotice('项目状态与备注已保存并读回确认；完成仅为人工标记，不代表已发布。'); }
-    } catch (reason) { if (active.current) setError(message(reason)); }
+      if (active.current) {
+        onTaskSaved(saved);
+        setProgressFeedback({kind: 'success', text: '项目进度已保存'});
+      }
+    } catch (reason) {
+      if (active.current) setProgressFeedback({kind: 'error', text: message(reason)});
+    }
     finally { if (active.current) setSaving(false); }
   };
   return <article className="content-project-detail">
     <header><p className="content-workspace-eyebrow">创作项目 · {statusLabels[task.status]}</p><h2>{task.title}</h2>
-      <p className="content-project-meta">画像：{persona} · 项目 ID：{task.task_id}<br />产物位置：{task.output_path || '尚无产物'}</p></header>
+      <p className="content-project-meta">画像：{persona || '通用模式'}</p>
+      {renaming && <form className="content-project-header-actions" onSubmit={renameProject}>
+        <input className="field" aria-label="项目名称" maxLength={120} value={projectName} required autoFocus
+          disabled={savingName} onChange={event => setProjectName(event.target.value)} />
+        <button className="btn btn-sm btn-primary" type="submit" disabled={savingName || !projectName.trim()}>保存项目名称</button>
+        <button className="btn btn-sm" type="button" disabled={savingName} onClick={() => setRenaming(false)}>取消</button>
+      </form>}
+      <div className="content-project-header-actions">
+        {!renaming && <button className="btn btn-sm" type="button" onClick={() => {
+          setProjectName(task.title);
+          setRenaming(true);
+        }}>重命名项目</button>}
+        {task.session_id && onOpenProjectChat && <button className="btn btn-sm" onClick={() => onOpenProjectChat(task)}>打开项目对话</button>}
+        <button type="button" className="btn btn-sm btn-danger" onClick={() => setDeleting(true)}>删除项目</button>
+      </div>
+    </header>
+    {deleting && <ContentDeleteDialog name={task.title} kind="项目" persona={persona} taskId={task.task_id}
+      onDeleted={result => { setDeleting(false); onDeleted(result); }} onClose={() => setDeleting(false)} />}
+    {openedVersionId && (openedVersion
+      ? <section aria-label="已保存的对话稿" className="content-project-card content-project-saved-version">
+        <p role="status" className="content-project-notice">已保存到内容库</p>
+        <details className="content-version-preview" open><summary>{publishArticle(openedVersion).title || openedVersion.name}</summary><pre>{publishArticle(openedVersion).text}</pre></details>
+        <button type="button" className="btn btn-sm" disabled={!onPreparePublish || versionsLoading || !openedVersion.text.trim()}
+          onClick={() => preparePublish(openedVersion)}>交给发布页</button>
+      </section>
+      : versionsLoading ? <p role="status">正在打开已保存的稿件…</p>
+      : <p role="alert" className="workbench-error">{versionError || '未能打开稿件，请刷新版本重试。'}</p>)}
     {error && <p role="alert" className="workbench-error">{error}</p>}
-    {notice && <p role="status" className="content-project-notice">{notice}</p>}
-    <fieldset className="content-project-metadata" disabled={saving}><legend>项目进度</legend>
-      <label>状态<select aria-label="项目状态" value={status} onChange={event => setStatus(event.target.value as WorkbenchTask['status'])}>
-        {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label} · {value}</option>)}
-      </select></label>
-      <label>备注<textarea aria-label="项目备注" value={note} maxLength={2000} placeholder="记录进展或阻塞原因" onChange={event => setNote(event.target.value)} /></label>
-      <button className="btn btn-sm" onClick={saveMetadata}>{saving ? '正在保存…' : '保存项目状态与备注'}</button>
-      <p className="content-project-meta">完成只由你手动标记。保存稿件、交给发布页和创建排期均不会自动完成项目。</p>
-    </fieldset>
+    <section className="content-project-card content-project-progress" aria-labelledby="project-progress-heading">
+      <h3 id="project-progress-heading">项目进度</h3>
+      <fieldset className="content-project-metadata" disabled={saving} aria-labelledby="project-progress-heading">
+        <div className="content-progress-fields">
+          <label className="content-project-field">
+            <span>状态</span>
+            <span className="content-project-select content-progress-status" data-status={status}>
+              <select aria-label="项目状态" value={status} onChange={event => {
+                setStatus(event.target.value as WorkbenchTask['status']);
+                setProgressFeedback(null);
+              }}>
+                {Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </span>
+          </label>
+          <label className="content-project-field">
+            <span>备注{status === 'blocked' && <span className="content-progress-required">必填</span>}</span>
+            <textarea aria-label="项目备注" aria-required={status === 'blocked'}
+              aria-invalid={status === 'blocked' && !note.trim() && progressFeedback?.kind === 'error'}
+              value={note} rows={2} maxLength={2000}
+              placeholder={status === 'blocked' ? '说明项目遇到的阻碍' : '记录项目进展或下一步'}
+              onChange={event => { setNote(event.target.value); setProgressFeedback(null); }} />
+          </label>
+        </div>
+        <div className="content-progress-footer">
+          {progressFeedback
+            ? <p className="content-progress-feedback" data-kind={progressFeedback.kind}
+                role={progressFeedback.kind === 'error' ? 'alert' : 'status'}>{progressFeedback.text}</p>
+            : <p className="content-progress-hint">完成状态由你手动标记。</p>}
+          <button type="button" className="btn btn-primary" onClick={saveMetadata}>
+            {saving ? '正在保存…' : '保存项目状态与备注'}
+          </button>
+        </div>
+      </fieldset>
+    </section>
     <details className="content-project-source"><summary>项目来源与原始线索</summary>
-      <p>来源：已有工作台任务{task.card?.evergreen ? ' · 常青方向（非热点）' : ''}。项目与任务使用同一 ID。</p>
+      <p>来源：{task.source === 'chat' ? '对话' : '工作台'}{task.card?.evergreen ? ' · 常青方向' : ''}</p>
       {task.card?.source_title && <p>线索原题：{task.card.source_title}</p>}
       {task.card?.sources?.length ? task.card.sources.map((source, index) => <p key={index}>
         {source.provider || source.platform} · {source.kind === 'search' ? '联网搜索' : '热榜线索'} · {source.evidence}{' '}
@@ -221,43 +347,98 @@ function ContentProject({persona, task, onGenerateWorkbench, onNavigate, onPrepa
       </p>) : <p>没有外部来源记录；不代表已核验的新闻事实。</p>}
     </details>
     <section aria-label="项目创作编辑"><h3>讨论与稿件</h3><p className="content-project-meta">沿用此项目的创作依据、个人灵感与历史版本。完成需手动标记。</p>
-      <label>创作目标平台<select aria-label="创作目标平台" value={target} onChange={e=>setTarget(e.target.value)}>{CREATION_PLATFORMS.map(p=><option key={p}>{p}</option>)}</select></label>
+      <label className="content-project-field content-project-platform">
+        <span>创作目标平台</span>
+        <span className="content-project-select">
+          <select aria-label="创作目标平台" value={target} onChange={event => setTarget(event.target.value)}>
+            {CREATION_PLATFORMS.map(name => <option key={name}>{name}</option>)}
+          </select>
+        </span>
+      </label>
       {platformNotice(target) && <p className="content-project-meta" role="note">{platformNotice(target)}</p>}
       <DiscussionEditor persona={persona} taskId={task.task_id} onNavigate={onNavigate}
+        onVersionSaved={saved => {
+          ++versionRequest.current;
+          setVersionsLoading(false);
+          setVersionError('');
+          setVersions(current => [...current.filter(version => version.id !== saved.id), saved]);
+          setVersionId(saved.id);
+        }}
         onAction={format => onGenerateWorkbench({task_id: task.task_id, title: task.title}, format, [target])} />
     </section>
-    <section className="content-project-versions" aria-label="版本交付"><div className="content-project-section-head"><h3>历史版本与交付</h3>
-      <button className="btn btn-sm" disabled={versionsLoading} onClick={refreshVersions}>刷新版本</button></div>
-      <p className="content-project-meta">在上方另存稿件后，点「刷新版本」读取真实版本；不会重置正在编辑的正文。请明确选择交付版本。</p>
-      {versionsLoading && <p role="status">正在读取历史版本…</p>}
-      {versionError && <p role="alert" className="workbench-error">{versionError}</p>}
-      {!versionsLoading && !versionError && !versions.length && <p className="content-project-meta">暂无保存的稿件版本，请先在编辑区保存新版本。</p>}
-      <label>交付版本<select aria-label="交付版本" value={versionId} disabled={versionsLoading} onChange={event => setVersionId(event.target.value)}>
-        <option value="">选择历史版本</option>
-        {versions.map(version => <option key={version.id} value={version.id}>{version.name} · {version.created_at} · {version.id}</option>)}
-      </select></label>
-      {selectedVersion && <details className="content-version-preview"><summary>核对交付正文 · {selectedVersion.name}</summary><pre>{selectedVersion.text}</pre></details>}
-      <button className="btn btn-sm" disabled={versionsLoading || !selectedVersion?.text.trim() || !onPreparePublish} onClick={preparePublish}>交给发布页</button>
-      <p className="content-project-meta">只传递所选版本的正文与 ID，不会真实发布。{!onPreparePublish && '当前入口尚未连接发布页。'}</p>
+    <section className="content-project-card content-project-versions" aria-label="版本交付">
+      <header className="content-project-card-head">
+        <h3>历史版本与交付</h3>
+        <button type="button" className="btn btn-sm" disabled={versionsLoading} onClick={refreshVersions}>刷新版本</button>
+      </header>
+      {versionsLoading && <p role="status" className="content-project-feedback">正在读取历史版本…</p>}
+      {versionError && <p role="alert" className="content-project-feedback" data-kind="error">{versionError}</p>}
+      {!versionsLoading && !versionError && !versions.length &&
+        <p className="content-project-feedback">在上方保存新版本后，即可选择稿件交付或排期。</p>}
+      <div className="content-project-delivery-row">
+        <label className="content-project-field">
+          <span>交付版本</span>
+          <span className="content-project-select">
+            <select aria-label="交付版本" value={versionId} disabled={versionsLoading || !versions.length}
+              title={selectedVersion && versionLabel(selectedVersion)}
+              onChange={event => setVersionId(event.target.value)}>
+              <option value="">请选择稿件版本</option>
+              {versions.map(version => <option key={version.id} value={version.id}>{versionLabel(version)}</option>)}
+            </select>
+          </span>
+        </label>
+        <button type="button" className="btn btn-primary" disabled={versionsLoading || !selectedVersion?.text.trim() || !onPreparePublish}
+          onClick={() => preparePublish(selectedVersion)}>交给发布页</button>
+      </div>
+      {selectedVersion && <details className="content-version-preview">
+        <summary>核对交付正文 · {selectedVersion.name}</summary>
+        <pre>{selectedVersion.text}</pre>
+      </details>}
+      {onPreparePublish && versions.length > 0 && <p className="content-project-hint">打开发布页，核对稿件和发布平台。</p>}
     </section>
-    <section className="content-project-schedule" aria-label="项目排期"><h3>安排这个项目</h3>
-      <p className="content-project-meta">日期、时间、平台和稿件版本均由你明确选择。排期只是计划，不会执行发布或标记项目完成。</p>
-      <fieldset disabled={scheduling || !!pendingSchedule} className="content-schedule-fields"><legend className="content-workspace-sr-only">排期设置</legend>
-        <label>日期<input type="date" aria-label="排期日期" value={date} onChange={event => setDate(event.target.value)} /></label>
-        <label>时间<input type="time" aria-label="排期时间" value={time} onChange={event => setTime(event.target.value)} /></label>
-        <label>平台<select aria-label="排期平台" value={platform} onChange={event => setPlatform(event.target.value)}>
-          <option value="">请选择平台</option>{schedulePlatforms.map(value => <option key={value} value={value}>{value}</option>)}
-        </select></label>
-        <label>版本<select aria-label="排期版本" disabled={versionsLoading} value={scheduleVersionId} onChange={event => setScheduleVersionId(event.target.value)}>
-          <option value="">请选择稿件版本</option>{versions.map(version => <option key={version.id} value={version.id}>{version.name} · {version.created_at} · {version.id}</option>)}
-        </select></label>
+    <section className="content-project-card content-project-schedule" aria-label="项目排期">
+      <header className="content-project-card-head"><h3>安排这个项目</h3></header>
+      <fieldset disabled={scheduling || !!pendingSchedule} aria-label="排期设置" className="content-schedule-fields">
+        <label className="content-project-field">
+          <span>日期</span>
+          <input type="date" aria-label="排期日期" value={date} onChange={event => setDate(event.target.value)} />
+        </label>
+        <label className="content-project-field">
+          <span>时间</span>
+          <input type="time" aria-label="排期时间" value={time} onChange={event => setTime(event.target.value)} />
+        </label>
+        <label className="content-project-field">
+          <span>平台</span>
+          <span className="content-project-select">
+            <select aria-label="排期平台" value={platform} onChange={event => setPlatform(event.target.value)}>
+              <option value="">请选择平台</option>
+              {schedulePlatforms.map(value => <option key={value} value={value}>{value}</option>)}
+            </select>
+          </span>
+        </label>
+        <label className="content-project-field">
+          <span>稿件版本</span>
+          <span className="content-project-select">
+            <select aria-label="排期版本" disabled={versionsLoading || !versions.length}
+              title={scheduleVersion && versionLabel(scheduleVersion)}
+              value={scheduleVersionId} onChange={event => setScheduleVersionId(event.target.value)}>
+              <option value="">请选择稿件版本</option>
+              {versions.map(version => <option key={version.id} value={version.id}>{versionLabel(version)}</option>)}
+            </select>
+          </span>
+        </label>
       </fieldset>
-      {platformNotice(platform) && <p className="content-project-meta" role="note">{platformNotice(platform)}</p>}
-      <button className="btn btn-sm" disabled={!canSchedule} onClick={schedule}>创建项目排期</button>
-      {scheduling && <p role="status">正在保存并读回核验排期…</p>}
-      {scheduleError && <p role="alert" className="workbench-error">{scheduleError}</p>}
-      {pendingSchedule && <button className="btn btn-sm" disabled={scheduling} onClick={recheckSchedule}>重新核验排期</button>}
-      {scheduleNotice && <p role="status" className="content-project-notice">{scheduleNotice}</p>}
+      {platformNotice(platform) && <p role="note" className="content-project-hint">{platformNotice(platform)}</p>}
+      {scheduling && <p role="status" className="content-project-feedback">正在保存并核验排期…</p>}
+      {scheduleError && <p role="alert" className="content-project-feedback" data-kind="error">{scheduleError}</p>}
+      {scheduleNotice && <p role="status" className="content-project-feedback" data-kind="success">{scheduleNotice}</p>}
+      <footer className="content-progress-footer">
+        <p className="content-progress-hint">排期会记录到日历，发布仍需确认。</p>
+        <div className="content-project-card-actions">
+          <button type="button" className="btn btn-primary" disabled={!canSchedule} onClick={schedule}>创建项目排期</button>
+          {pendingSchedule && <button type="button" className="btn" disabled={scheduling} onClick={recheckSchedule}>重新核验排期</button>}
+        </div>
+      </footer>
     </section>
   </article>;
 }

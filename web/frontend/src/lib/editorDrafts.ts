@@ -11,6 +11,8 @@ export interface EditorDraft {
   sourceKind?: string;
   savedText: string;
   savedName: string;
+  articleTitle?: string;
+  savedArticleTitle?: string;
   brief?: Omit<WorkbenchBrief, 'evidence'>;
   inspiration?: {enabled: boolean; references: IdeaReference[]};
   savedBrief?: EditorDraft['brief'];
@@ -50,7 +52,8 @@ export function loadEditorDraft(key: string): EditorDraft {
   const stored = readDraft<Partial<EditorDraft>>(key);
   const draft = emptyEditorDraft();
   if (!stored || typeof stored !== 'object') return draft;
-  for (const field of ['text', 'name', 'selectedVersion', 'sourceVersionId', 'sourceTurnId', 'sourceKind', 'savedText', 'savedName'] as const) {
+  for (const field of ['text', 'name', 'selectedVersion', 'sourceVersionId', 'sourceTurnId', 'sourceKind', 'savedText', 'savedName',
+    'articleTitle', 'savedArticleTitle'] as const) {
     if (typeof stored[field] === 'string') draft[field] = stored[field];
   }
   for (const field of ['brief', 'savedBrief'] as const) {
@@ -65,10 +68,11 @@ export function loadEditorDraft(key: string): EditorDraft {
 }
 export function editorDirty(draft: EditorDraft): boolean {
   return draft.text !== draft.savedText || draft.name !== draft.savedName
+    || (draft.articleTitle || '') !== (draft.savedArticleTitle || '')
     // A legacy working copy without a baseline is not proof of a server save.
     || (!!draft.brief && (!draft.savedBrief || JSON.stringify(briefFields(draft.brief)) !== JSON.stringify(briefFields(draft.savedBrief))))
     || (!!draft.inspiration && (!draft.savedInspiration || JSON.stringify(inspirationFields(draft.inspiration)) !== JSON.stringify(inspirationFields(draft.savedInspiration))));
 }
 export function confirmDraftReplacement(draft: EditorDraft): boolean {
-  return !editorDirty(draft) || window.confirm('当前正文、版本名、创作依据或个人灵感引用尚未保存。替换会覆盖工作草稿，是否继续？');
+  return !editorDirty(draft) || window.confirm('当前稿件或创作依据有未保存的修改。是否替换工作草稿？');
 }

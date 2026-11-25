@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import MessageBubble from './MessageBubble';
+import ArticleTitleAssistant from './ArticleTitleAssistant';
 import QuestionCards from './QuestionCards';
 import BrushEntry from './BrushEntry';
 import type { ChatSession, ChatMessage, StreamState } from '../lib/store';
@@ -7,10 +8,12 @@ import { uploadFiles, adoptOversize } from '../lib/api';
 import type { UploadedFile } from '../lib/api';
 import { IconArrowUp, IconStop, IconPlus, IconFile } from './icons';
 import { draftKey, readDraft, writeDraft } from '../lib/editorDrafts';
+import { splitArticleHeading } from '../lib/article';
 
 interface ChatPageProps {
   projectTitle?: string;
   onBackProject?: () => Promise<void>;
+  onSaveReply: (reply: ChatMessage, index: number, title: string, text: string, articleTitle: string) => Promise<void>;
   apiDirect: boolean;
   session: ChatSession;
   stream?: StreamState;          // 进行中的流式态（来自 App，切页也不丢）
@@ -40,8 +43,74 @@ function greeting(): string {
   return `${g}，想创作点什么？`;
 }
 
-export default function ChatPage({ apiDirect, session, stream, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed, projectTitle, onBackProject }: ChatPageProps) {
+function SaveReplyDialog({message, projectTitle, persona, onSave, onClose}: {
+  message: ChatMessage; projectTitle?: string; persona?: string;
+  onSave: (title: string, text: string, articleTitle: string) => Promise<void>; onClose: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const saving = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const body = message.content.match(/【正文开始】\s*([\s\S]*?)\s*【正文结束】/)?.[1]?.trim();
+  const article = splitArticleHeading(body || message.content.trim());
+  const [text, setText] = useState(article.body);
+  const [articleTitle, setArticleTitle] = useState(article.title);
+  const [title, setTitle] = useState('');
+  useEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (saving.current || !text.trim() || !articleTitle.trim() || text.length > 200000 || (!projectTitle && !title.trim())) return;
+    saving.current = true;
+    setBusy(true);
+    setError('');
+    try {
+      await onSave(title.trim(), text.trim(), articleTitle.trim());
+      onClose();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '保存失败，请重试');
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
+  };
+  return <dialog ref={dialog} className="chat-save-dialog" aria-labelledby="chat-save-title"
+    onCancel={event => { event.preventDefault(); if (!saving.current) onClose(); }}>
+    <form onSubmit={submit}>
+      <h2 id="chat-save-title">保存到内容库</h2>
+      <p>{projectTitle ? `保存为「${projectTitle}」的一个稿件版本。` : `保存到${persona ? `「${persona}」` : '通用内容库'}，并为这段对话建立一个创作项目。`}</p>
+      <fieldset disabled={busy}>
+        {!projectTitle && <label>项目名称<input required maxLength={120} value={title} onChange={event => setTitle(event.target.value)} /></label>}
+        <label>文章标题<input autoFocus required maxLength={120} value={articleTitle} onChange={event => setArticleTitle(event.target.value)} /></label>
+        <ArticleTitleAssistant title={articleTitle} body={text} persona={persona || ''} disabled={busy} onApply={setArticleTitle} />
+        <label>稿件正文<textarea required value={text} onChange={event => setText(event.target.value)} /></label>
+      </fieldset>
+      {!body && <p>已带入整条回复，可在这里删掉不需要的段落。</p>}
+      {text.length > 200000 && <p role="alert">正文超过 20 万字，请缩短后保存。</p>}
+      {error && <p role="alert" className="workbench-error">{error}</p>}
+      <footer>
+        <button type="button" className="btn" disabled={busy} onClick={onClose}>取消</button>
+        <button type="submit" className="btn btn-primary" disabled={busy || !text.trim() || !articleTitle.trim() || text.length > 200000 || (!projectTitle && !title.trim())}>
+          {busy ? '正在保存…' : '保存并打开'}
+        </button>
+      </footer>
+    </form>
+  </dialog>;
+}
+
+function canSaveReply(message: ChatMessage) {
+  const text = message.content.trim();
+  return message.role === 'assistant' && !message.incomplete && !!text
+    && (message.incomplete === false ||
+      !/(?:^|\n\n)Error: |_(?:（已停止）)_$|^上一轮任务记录已失效|^（无输出）$/u.test(text));
+}
+
+export default function ChatPage({ apiDirect, session, stream, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed, projectTitle, onBackProject, onSaveReply }: ChatPageProps) {
   const [projectError, setProjectError] = useState('');
+  const [saveReply, setSaveReply] = useState<{message: ChatMessage; index: number} | null>(null);
   const key = draftKey('chat', session.persona || '', session.id);
   const restored = readDraft<{input: string; attachments: UploadedFile[]}>(key);
   const [input, setInputValue] = useState(typeof restored?.input === 'string' ? restored.input : '');
@@ -200,7 +269,7 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
 
   const projectBar = <div className="workbench-meta" style={{padding:'8px 20px'}}>
     <div>此对话身份：{session.persona || '通用模式'} · 不随顶部工作画像切换。</div>
-    {projectTitle ? <>内容项目：{projectTitle} <button onClick={() => { void onBackProject?.().catch(e => setProjectError(String(e.message || e))); }}>返回内容项目</button> · 对话结束后在项目里取回正文、审核并另存版本。</> : '自由对话：不会自动建立内容项目或保存正式稿件。正式创作请从灵感或热点进入内容项目。'}
+    {projectTitle ? <>内容项目：{projectTitle} <button onClick={() => { void onBackProject?.().catch(e => setProjectError(String(e.message || e))); }}>返回内容项目</button></> : '自由对话 · 选中满意的回复即可保存到内容库。'}
     {projectError && <p role="alert">{projectError}</p>}
   </div>;
   // ---- 空态：居中欢迎页 ----
@@ -240,7 +309,9 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
 
   return (
     <div className="chat-page">
-        {projectBar}
+      {projectBar}
+      {saveReply && <SaveReplyDialog message={saveReply.message} projectTitle={projectTitle} persona={session.persona}
+        onSave={(title, text, articleTitle) => onSaveReply(saveReply.message, saveReply.index, title, text, articleTitle)} onClose={() => setSaveReply(null)} />}
       <div className="chat-messages">
         <div className="chat-thread">
           {displayMessages.map((msg, i) => {
@@ -265,6 +336,7 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
                 const prevUser = pi >= 0 && session.messages[pi]?.role === 'user' ? session.messages[pi] : null;
                 actions = {
                   onCopy: copy,
+                  onSave: canSaveReply(msg) ? () => setSaveReply({message: msg, index: i}) : undefined,
                   onRetry: (isLastFinal && prevUser)
                     ? () => onResend(pi, prevUser.content, prevUser.attachments, prevUser.agentContent)
                     : undefined,

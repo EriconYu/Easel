@@ -101,15 +101,32 @@ def search(path, q='', persona='', exclude='', good_only=False):
     if not isinstance(q, str) or len(q) > 500: raise ValueError('搜索词过长')
     tokens = q.lower().split()
     with LOCK:
-        return [x for x in read(path) if x['id'] != exclude
+        results = [x for x in read(path) if x['id'] != exclude
                 and (not persona or x['persona'] in {'', persona})
                 and (not good_only or x['good_performance'] or x['priority_reuse'])
                 and all(token in '\n'.join([x.get(k, '') for k in ('id','title','original_text','note','topic','source','review_note')] + x['tags']).lower() for token in tokens)]
+        deleted_by_profile = {}
+        for item in results:
+            for owner, development in list(item['developments'].items()):
+                if owner not in deleted_by_profile:
+                    deleted_by_profile[owner] = _deleted_tasks(owner)
+                if development.get('task_id') in deleted_by_profile[owner]:
+                    del item['developments'][owner]
+        return results
+
+
+def _deleted_tasks(persona):
+    try:
+        return w.deleted_tasks(persona)
+    except ValueError:
+        return set()
 
 def delete(path, identifier):
     with LOCK:
         items = read(path); item = find(items, identifier)
-        if item['developments']: raise ValueError('已有发展任务，请归档以保留稿件关联')
+        if any(development.get('task_id') not in _deleted_tasks(owner)
+               for owner, development in item['developments'].items()):
+            raise ValueError('已有发展任务，请归档以保留稿件关联')
         write(path, [x for x in items if x['id'] != identifier])
         return {'ok': True, 'deleted': identifier}
 
@@ -213,4 +230,4 @@ def versions(path, identifier, persona):
         w._persona(persona)
         if item['persona'] != persona: raise ValueError('灵感不属于当前画像')
         task_id = item['developments'].get(persona, {}).get('task_id')
-        return w.list_versions(persona, task_id) if task_id else []
+        return w.list_versions(persona, task_id) if task_id and task_id not in w.deleted_tasks(persona) else []

@@ -14,18 +14,19 @@ def validate_link(data: dict, existing: dict | None = None) -> dict:
         if value is not None and not isinstance(value, str):
             raise ValueError(f'无效关联字段：{field}')
         link[field] = value or ''
-    if bool(link['persona']) != bool(link['task_id']):
+    if (link['persona'] and not link['task_id']) or (link['task_id'] and data.get('persona') is None):
         raise ValueError('关联内容项目必须同时提供 persona 和 task_id')
     prior = existing or {}
-    if prior.get('persona') and prior.get('task_id'):
-        if link['persona'] and any(link[field] != prior[field] for field in ('persona', 'task_id')):
+    if prior.get('task_id'):
+        prior_identity = (prior.get('persona') or '', prior['task_id'])
+        if link['task_id'] and (link['persona'], link['task_id']) != prior_identity:
             raise ValueError('已有日历关联不能改绑其他内容项目')
-        for field in ('persona', 'task_id', 'version_id'):
-            link[field] = link[field] or prior.get(field) or ''
+        link['persona'], link['task_id'] = prior_identity
+        link['version_id'] = link['version_id'] or prior.get('version_id') or ''
     if not any(link.values()):
         return {}
     persona, task_id, version_id = (link[field] for field in ('persona', 'task_id', 'version_id'))
-    if not persona or not task_id:
+    if not task_id:
         raise ValueError('关联内容项目必须同时提供 persona 和 task_id')
     if 'date' in data:
         from datetime import date
@@ -62,7 +63,7 @@ def canonical_platform(name):
 
 def duplicate(items: list, data: dict, exclude_id: str | None = None) -> dict | None:
     """调用方先验证关联，在原日历锁内查重；自由日历始终保留旧行为。"""
-    if not data.get('persona') or not data.get('task_id') or data.get('kind') == 'event':
+    if data.get('persona') is None or not data.get('task_id') or data.get('kind') == 'event':
         return None
     fields = ('persona', 'task_id', 'version_id', 'platform', 'date', 'time', 'kind')
     target = tuple(canonical_platform(data.get(field)) if field == 'platform' else (data.get(field) or ('content' if field == 'kind' else '')) for field in fields)

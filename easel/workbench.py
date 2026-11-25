@@ -25,6 +25,7 @@ def _persona(name):
     return name
 
 def _profile(persona):
+    if persona == '': return ''
     directory = PROFILES_DIR / _persona(persona)
     for path in (directory, *directory.parents):
         if path.is_symlink(): raise ValueError('画像路径包含符号链接')
@@ -42,7 +43,7 @@ def _path(persona):
     # 不允许根目录或任一父路径为符号链接。
     for p in (root, *root.parents):
         if p.is_symlink(): raise ValueError('存储路径包含符号链接')
-    p = root / _persona(persona) / 'state.json'
+    p = root / ('_general' if persona == '' else _persona(persona)) / 'state.json'
     if p.parent.is_symlink() or p.is_symlink(): raise ValueError('存储路径包含符号链接')
     return p
 
@@ -74,6 +75,20 @@ def snapshot(persona):
     with _LOCK: return _read(persona)
 def load(persona): return snapshot(persona)['recommendations']
 def tasks(persona): return snapshot(persona)['tasks']
+
+
+def deleted_tasks(persona):
+    return set(snapshot(persona).get('deleted_tasks', []))
+
+
+def remove_task(data, task_id):
+    data['tasks'] = [task for task in data['tasks'] if task['task_id'] != task_id]
+    data['recommendations']['cards'] = [card for card in data['recommendations']['cards'] if card['task_id'] != task_id]
+    for field in ('versions', 'briefs'):
+        data.get(field, {}).pop(task_id, None)
+    data.setdefault('deleted_tasks', []).append(task_id)
+
+
 def _text(value, limit=1000):
     if not isinstance(value, str) or len(value) > limit: raise ValueError('文本类型或长度无效')
     return value.strip()
@@ -142,11 +157,21 @@ def _card(data, task_id):
     if not card and not existing: raise ValueError('任务不属于当前画像')
     return existing['card'] if existing else card, existing
 
+def new_task(card, context):
+    return {'task_id': card['task_id'], 'title': card['title'], 'card': card,
+            'recommendation_context': context, 'status': 'todo',
+            'output_path': f"outputs/主题-{card['task_id']}/"}
+
+
 def save_task(persona, task):
-    if not isinstance(task,dict) or set(task)-{'task_id','status','note','output_path','publish_url','session_id'}: raise ValueError('无效任务字段')
+    if not isinstance(task,dict) or set(task)-{'task_id','title','status','note','output_path','publish_url','session_id'}: raise ValueError('无效任务字段')
     with _LOCK:
         data=_read(persona); card,existing=_card(data,task.get('task_id'))
-        value={**(existing or {'task_id':card['task_id'],'title':card['title'],'card':card,'recommendation_context':{k:v for k,v in data['recommendations'].items() if k!='cards'},'status':'todo','output_path':f"outputs/主题-{card['task_id']}/"}),**task}
+        value={**(existing or new_task(card, {k:v for k,v in data['recommendations'].items() if k!='cards'})),**task}
+        if 'title' in task:
+            value['title'] = _text(task['title'], 120)
+            if not value['title']:
+                raise ValueError('请填写项目名称')
         if value['status'] not in {'todo','doing','done','blocked'}: raise ValueError('无效任务状态')
         for field in ('note','session_id'):
             if field in value: _text(value[field],2000 if field=='note' else 200)
@@ -202,10 +227,10 @@ def save_brief(persona, task_id, brief):
     return implementation(persona, task_id, brief)
 
 
-def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None):
+def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None, article_title=None):
     from .workbench_evidence import save_version as implementation
     return implementation(persona, task_id, name, text,
-                          source_version_id=source_version_id, source_turn_id=source_turn_id)
+                          source_version_id=source_version_id, source_turn_id=source_turn_id, article_title=article_title)
 
 
 def list_versions(persona, task_id):

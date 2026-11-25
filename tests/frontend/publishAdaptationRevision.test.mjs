@@ -4,7 +4,7 @@ import {publishHarness, compile, read} from './publishHarness.mjs';
 import {runInNewContext} from 'node:vm';
 
 const sourceA={task_id:'A',persona:'甲',version_id:'A-v1'};
-const sourceB={...sourceA,task_id:'B',version_id:'B-v1',title:'B标题',text:'B正文'};
+const sourceB={...sourceA,task_id:'B',version_id:'B-v1',versionName:'修订稿',title:'B标题',text:'B正文',platform:'掘金'};
 for(const page of ['PublishPage','ManualPublishPage']) {
   test(`${page}: 停止后导入 B，迟到 A 的 chunk/completion/error 不能重填适配稿`, async()=>{
     const requests=[];
@@ -55,14 +55,61 @@ for(const page of ['PublishPage','ManualPublishPage']) {
   });
 }
 
+function renderHandoff(props) {
+  const exports = {};
+  const effects = [];
+  const jsx = (type, props) => ({ type, props });
+  const react = {
+    useCallback: callback => callback,
+    useRef: current => ({ current }),
+    useEffect: effect => effects.push(effect),
+  };
+  runInNewContext(compile(read('components/ProjectPublishSource.tsx')), {
+    exports, require: name => name === 'react' ? react : { jsx, jsxs: jsx },
+  });
+  const root = exports.default({ draft: sourceB, persona: '甲', busy: false, hasDraft: false, ...props });
+  effects.forEach(effect => { effect(); effect(); }); // Strict Mode re-runs effects.
+  const nodes = [];
+  const walk = node => {
+    if (Array.isArray(node)) node.forEach(walk);
+    else if (node && typeof node === 'object') {
+      nodes.push(node);
+      walk(node.props?.children);
+    }
+  };
+  walk(root);
+  return nodes;
+}
+
 test('项目稿件入口 busy 时禁用导入并给出可访问提示',()=>{
-  const exports={};let imports=0;
-  const jsx={jsx:(type,props)=>({type,props}),jsxs:(type,props)=>({type,props})};
-  runInNewContext(compile(read('components/ProjectPublishSource.tsx')),{exports,require:()=>jsx});
-  const root=exports.default({draft:sourceB,persona:'甲',busy:true,onImport:()=>imports++});
-  const nodes=[];const walk=n=>{if(Array.isArray(n))n.forEach(walk);else if(n&&typeof n==='object'){nodes.push(n);walk(n.props?.children);}};walk(root);
+  let imports = 0;
+  const nodes = renderHandoff({ busy: true, onImport: () => imports++ });
   const button=nodes.find(n=>n.type==='button');
   assert.equal(button.props.disabled,true);
   assert.ok(nodes.some(n=>n.props?.role==='status'),'应说明等待当前操作结束');
   button.props.onClick();assert.equal(imports,0,'不能绕过 busy 保护调用导入');
+});
+
+test('空发布草稿自动载入一次，已有草稿可保留或明确替换', () => {
+  const imported = [];
+  const handled = [];
+  const onImport = draft => imported.push(draft);
+  const onHandled = draft => handled.push(draft);
+  assert.equal(renderHandoff({ onImport, onHandled }).length, 0);
+  assert.deepEqual(imported, [sourceB]);
+  assert.deepEqual(handled, [sourceB]);
+
+  const buttons = () => renderHandoff({ hasDraft: true, onImport, onHandled }).filter(node => node.type === 'button');
+  const [replace, keep] = buttons();
+  assert.equal(replace.props.children, '替换现有草稿');
+  assert.equal(keep.props.children, '保留当前草稿');
+  keep.props.onClick();
+  assert.deepEqual(imported, [sourceB]);
+  assert.deepEqual(handled, [sourceB, sourceB]);
+  buttons()[0].props.onClick();
+  assert.deepEqual(imported, [sourceB, sourceB]);
+  assert.deepEqual(handled, [sourceB, sourceB, sourceB]);
+
+  assert.equal(renderHandoff({ persona: '乙', onImport, onHandled }).length, 0);
+  assert.equal(imported.length, 2);
 });

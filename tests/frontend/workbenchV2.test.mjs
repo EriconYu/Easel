@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
+import {loadLibrary} from './publishHarness.mjs';
 const require = createRequire(new URL('../../web/frontend/package.json', import.meta.url));
 const ts = require('typescript');
 const read = path => readFileSync(new URL('../../web/frontend/src/' + path, import.meta.url), 'utf8');
 const tick = () => new Promise(resolve => setImmediate(resolve));
+const article = loadLibrary('lib/article.ts');
 const card = {task_id:'a', title:'关系变化', sources:[], evergreen:true, platforms:['公众号'], estimated_minutes:30};
 const task = {...card, status:'doing', session_id:'server-session', output_path:'outputs/a/'};
 const brief = {viewpoint:'原观点', skill_ids:[], document_ids:[], strict_mode:false, allow_web:true, reference_title:'', reference_text:''};
@@ -29,7 +31,7 @@ function harness(file, api, props, exportName = 'default') {
   runInNewContext(ts.transpileModule(read('lib/editorDrafts.ts'), {compilerOptions:{module:ts.ModuleKind.CommonJS, target:ts.ScriptTarget.ES2022}}).outputText,
     {exports:draftExports, localStorage, window, CustomEvent:class{}, Map});
   runInNewContext(ts.transpileModule(read(file), {compilerOptions:{module:ts.ModuleKind.CommonJS, jsx:ts.JsxEmit.ReactJSX}}).outputText,
-    {exports, Error, window, require:name=>name==='react'?react:name==='react/jsx-runtime'?jsx:name==='../lib/api'?api:name==='../lib/editorDrafts'?draftExports:name==='../lib/platformCapabilities'?capabilities:{default:'panel'}});
+    {exports, Error, window, require:name=>name==='react'?react:name==='react/jsx-runtime'?jsx:name==='../lib/api'?api:name==='../lib/editorDrafts'?draftExports:name==='../lib/platformCapabilities'?capabilities:name==='../lib/article'?article:{default:'panel'}});
   const walk = (node, out=[]) => {
     if (Array.isArray(node)) node.forEach(value=>walk(value,out));
     else if (node && typeof node==='object') {out.push(node);walk(node.props?.children,out);}

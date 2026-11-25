@@ -6,14 +6,10 @@ import {
 import type { AccountItem, OutputFile } from '../lib/api';
 import { loadPublishDraft, savePublishDraft, createPublishSnapshot, recoverableLegacyPublishDraft, restoreLegacyPublishDraft } from '../lib/store';
 import ProjectPublishSource from './ProjectPublishSource';
-import type { ProjectPublishDraft } from './ProjectPublishSource';
+import ArticleTitleAssistant from './ArticleTitleAssistant';
+import type { ProjectPublishProps } from './ProjectPublishSource';
 import { renderMarkdown } from '../lib/sanitize';
 import { IconPublish, IconCopy, IconCheck, IconCalendar, IconSkills, IconEdit, IconStop, IconTrash } from './icons';
-
-interface PublishPageProps {
-  persona: string;
-  projectDraft?: ProjectPublishDraft;
-}
 
 import { AUTOMATED_PLATFORMS, SCHEDULE_PLATFORMS, platformCapability, platformNotice } from '../lib/platformCapabilities';
 const PLATFORMS = AUTOMATED_PLATFORMS;
@@ -32,19 +28,21 @@ function parseSections(text: string): Record<string, string> {
 
 type PubState = { status: 'publishing' | 'ok' | 'fail'; msg: string };
 
-export default function PublishPage(props: PublishPageProps) {
+export default function PublishPage(props: ProjectPublishProps) {
   return <PersonaPublishPage key={props.persona} {...props} />;
 }
 
-function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
+function PersonaPublishPage({ persona, projectDraft, onProjectDraftHandled }: ProjectPublishProps) {
   const draft0 = useRef(loadPublishDraft(persona)).current;
   const [projectSource, setProjectSource] = useState(draft0.project_source);
   const [title, setTitle] = useState(draft0.title);
+  const [articleTitleSet, setArticleTitleSet] = useState(draft0.articleTitleSet);
   const [body, setBody] = useState(draft0.body);
   const [platforms, setPlatforms] = useState<string[]>(draft0.platforms);
+  const [platformTitles, setPlatformTitles] = useState(draft0.platformTitles || {});
   const [overrides, setOverrides] = useState<Record<string, string>>(draft0.overrides);
   const [tags, setTags] = useState(draft0.tags || '');
-  // 存草稿模式：只对声明了 draft 能力的平台（今日头条）生效，其余平台仍真发布
+  // 草稿模式仅提交到支持草稿的平台。
   const [asDraft, setAsDraft] = useState(false);
   // 公众号调用链仍由后端决定；这里仅明确展示其草稿箱结果。
   const [editing, setEditing] = useState<string | null>(null);
@@ -62,7 +60,9 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
   // 发布相关
   const [accounts, setAccounts] = useState<AccountItem[]>([]);
   const [mediaFiles, setMediaFiles] = useState<OutputFile[]>([]);
-  const [selectedMedia, setSelectedMedia] = useState<string[]>([]);
+  const [selectedMedia, setSelectedMedia] = useState<string[]>(draft0.media || []);
+  const [theme, setTheme] = useState(draft0.theme);
+  const [schedule, setSchedule] = useState(draft0.schedule);
   const [showPicker, setShowPicker] = useState(false);
   const [schedulePlatform, setSchedulePlatform] = useState('');
   const [pub, setPub] = useState<Record<string, PubState>>({});
@@ -74,8 +74,9 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
 
   // 草稿持久化：任何改动即写 localStorage，切页/刷新回来都在
   useEffect(() => {
-    savePublishDraft({ title, body, platforms, overrides, tags, project_source:projectSource }, persona);
-  }, [persona, title, body, platforms, overrides, tags, projectSource]);
+    savePublishDraft({title, body, articleTitleSet, platforms, platformTitles, overrides, tags, project_source: projectSource,
+      media: selectedMedia, theme, schedule}, persona);
+  }, [persona, title, body, articleTitleSet, platforms, platformTitles, overrides, tags, projectSource, selectedMedia, theme, schedule]);
 
   const cleanupPublishActivity = useCallback(() => {
     // 卸载：中止流 + 停掉所有发布状态轮询（否则在后台空转最长 15 分钟）
@@ -112,6 +113,7 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
     setPlatforms((prev) => prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]);
   const showToast = (m: string) => { setToast(m); setTimeout(() => setToast(''), 2800); };
   const effective = (k: string) => overrides[k] ?? body;
+  const effectiveTitle = (key: string) => platformTitles[key]?.trim() || title;
   const empty = !title.trim() && !body.trim();
   const isVideoPath = (p: string) => /\.(mp4|mov|flv|mkv|avi|webm|m4v|wmv|ts|mpe?g)$/i.test(p);
   const toggleMedia = (path: string) =>
@@ -174,7 +176,7 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
   };
 
   const capture = (targets = PLATFORMS.filter(p => platforms.includes(p.key))) => createPublishSnapshot(
-    { title, body, platforms, overrides, tags, project_source: projectSource }, persona, selectedMedia, asDraft, targets);
+    { title, body, platforms, platformTitles, overrides, tags, project_source: projectSource, theme }, persona, selectedMedia, asDraft, targets);
   const revision = JSON.stringify(capture());
   const currentRevision = useRef(revision);
   currentRevision.current = revision;
@@ -211,7 +213,7 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
   const publishAll = async () => {
     if (projectSource && projectSource.persona !== persona) { showToast('源稿属于另一个画像，请从正确内容项目重新载入'); return; }
     if (empty || publishing || checking || adapting || publishLock.current) return;
-    const targets = PLATFORMS.filter(p => platforms.includes(p.key) && PUBLISHABLE.has(p.key));
+    const targets = PLATFORMS.filter(p => platforms.includes(p.key) && (!asDraft || p.directDraft));
     if (!targets.length) { showToast('所选平台没有自动发布集成，请选择支持的平台'); return; }
     const snapshot = capture(targets);
     const reviewedRevision = revision;
@@ -304,55 +306,77 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
   };
 
   const copyFor = (key: string) => {
-    const text = (title ? title + '\n\n' : '') + effective(key);
+    const platformTitle = effectiveTitle(key);
+    const text = (platformTitle ? platformTitle + '\n\n' : '') + effective(key);
     navigator.clipboard?.writeText(text);
     setCopied(key); setTimeout(() => setCopied(''), 1400);
   };
   const addToCalendar = async (key: string) => {
-    if (empty) return;
+    const articleTitle = effectiveTitle(key).trim();
+    if (!articleTitle) return;
     // 用本地日期（日历页按本地渲染）：toISOString 是 UTC，东八区 0-8 点会落到「昨天」
     const d = new Date();
     const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    await savePublishSchedule({
-      title: title.trim() || effective(key).slice(0, 20), date,
-      platform: platformCapability(key)?.label || '', time: '', status: 'draft', note: effective(key),
-      ...projectSource,
-    });
-    showToast('已存为草稿并加入今天的日历');
+    try {
+      const saved = await savePublishSchedule({
+        title: articleTitle, date,
+        platform: platformCapability(key)?.label || '', time: '', status: 'draft', note: '',
+        ...projectSource, source: 'publish-page',
+        draft_content: {body: effective(key), tags, media: selectedMedia, persona, theme: key === 'wechat-oa' ? theme || '' : ''},
+      }, schedule?.platform === key ? schedule.id : undefined);
+      if (saved.id) setSchedule({id: saved.id, platform: key});
+      showToast('草稿已保存到内容日历');
+    } catch (error) { showToast(error instanceof Error ? error.message : '日历草稿保存失败'); }
   };
 
-  const legacyDraft = recoverableLegacyPublishDraft(persona);
+  const legacyDraft = !projectDraft && !projectSource && !schedule && empty && !tags.trim() && !selectedMedia.length
+    && !Object.values(overrides).some(text => text.trim()) ? recoverableLegacyPublishDraft(persona) : undefined;
   const restoreLegacy = () => {
     if (adapting || checking || publishing || !persona) return;
     if (!window.confirm(`将旧版草稿明确归入画像「${persona}」并替换当前画像的发布草稿。当前已有内容也会被覆盖；人工审核与平台状态将清空。确认恢复？`)) return;
     const d = restoreLegacyPublishDraft(persona);
     if (!d) { showToast('旧版草稿无法恢复，可能属于其他画像或浏览器存储已满'); return; }
     stopAdapt();
-    setTitle(d.title); setBody(d.body); setPlatforms(d.platforms); setOverrides(d.overrides); setTags(d.tags);
-    setProjectSource(d.project_source); setSelectedMedia([]); setCheckResult(''); setPub({}); setEditing(null); setAsDraft(false);
+    setTitle(d.title); setArticleTitleSet(d.articleTitleSet); setBody(d.body); setPlatforms(d.platforms); setOverrides(d.overrides); setTags(d.tags);
+    setPlatformTitles(d.platformTitles || {});
+    setProjectSource(d.project_source); setSelectedMedia(d.media || []); setTheme(d.theme); setSchedule(d.schedule);
+    setCheckResult(''); setPub({}); setEditing(null); setAsDraft(false);
     showToast('旧版草稿已恢复到当前画像，请重新核对并预检');
   };
-  const canPublish = platforms.some((k) => PUBLISHABLE.has(k));
-  // 已选平台里支持存草稿的（目前只有今日头条）——没有就不显示开关，避免误导
-  const draftCapable = PLATFORMS.filter((p) => platforms.includes(p.key) && p.draft);
+  const canPublish = PLATFORMS.some(p => platforms.includes(p.key) && (!asDraft || p.directDraft));
+  const draftCapable = PLATFORMS.filter(p => platforms.includes(p.key) && p.directDraft);
 
   return (
     <div className="publish-page">
       <div className="publish-editor">
         <h1 className="page-title"><IconPublish size={21} /> 发布中心</h1>
-        <ProjectPublishSource draft={projectDraft} persona={persona} busy={adapting || checking || publishing} onImport={d=>{
-          stopAdapt();
-          setTitle(d.title);setBody(d.text);setOverrides({});setTags('');setSelectedMedia([]);
-          setCheckResult('');setPub({});setEditing(null);
-          setProjectSource({persona:d.persona,task_id:d.task_id,version_id:d.version_id});
-        }} />
+        <ProjectPublishSource draft={projectDraft} persona={persona}
+          hasDraft={!empty || Object.values(overrides).some(text => text.trim()) || !!tags.trim() || selectedMedia.length > 0}
+          busy={adapting || checking || publishing} onHandled={onProjectDraftHandled} onImport={draft => {
+            stopAdapt();
+            const target = platformCapability(draft.platform);
+            setTitle(draft.title); setArticleTitleSet(true); setBody(draft.text); setPlatforms(target?.automated ? [target.key] : []);
+            setPlatformTitles({}); setOverrides({}); setTags(draft.tags || ''); setSelectedMedia(draft.media || []);
+            setTheme(draft.theme);
+            setSchedule(draft.scheduleId && target ? {id: draft.scheduleId, platform: target.key} : undefined);
+            setSchedulePlatform(target?.schedule ? target.label : '');
+            setCheckResult(''); setPub({}); setEditing(null); setAsDraft(false);
+            setProjectSource(draft.task_id ? {persona: draft.persona, task_id: draft.task_id, version_id: draft.version_id} : undefined);
+            showToast(target?.automated ? '项目稿件已载入，请核对平台预览。' : '项目稿件已载入，请选择发布平台。');
+          }} />
         {projectSource && <p className="page-subtitle">关联内容项目：{projectSource.task_id} · 源稿版本：{projectSource.version_id}。适配编辑不修改源稿。</p>}
         <p className="page-subtitle">一次编辑 → AI 一键改写成各平台版本 → 预检 → 附媒体 → 一键真发布。</p>
 
         {legacyDraft && <div className="panel" role="note"><p>{legacyDraft.project_source ? '发现旧版项目草稿，仅可恢复到源画像。' : '旧版草稿未关联画像。'} 不会自动载入；确认恢复会覆盖当前画像的草稿并清空审核。</p><button className="btn btn-sm" disabled={!persona || adapting || checking || publishing} onClick={restoreLegacy}>恢复旧版草稿到当前画像</button></div>}
-        <label className="field-label">标题</label>
-        <input className="field" value={title} placeholder="标题（部分平台需要）"
-          onChange={(e) => setTitle(e.target.value)} />
+        <label className="field-label" htmlFor="publish-article-title">文章标题</label>
+        <div className="article-title-field">
+          <input id="publish-article-title" className="field" value={title} placeholder="文章标题"
+            onChange={(e) => { setTitle(e.target.value); setArticleTitleSet(true); }} />
+          <ArticleTitleAssistant title={title} body={body} persona={persona} disabled={adapting || publishing} onApply={value => {
+            setTitle(value);
+            setArticleTitleSet(true);
+          }} />
+        </div>
         <label className="field-label">正文（母版）</label>
         <textarea className="field" style={{ minHeight: 180 }} value={body}
           placeholder="写下你的内容，右侧按各平台规则实时预览；点「一键适配」让 AI 分平台改写…"
@@ -372,7 +396,7 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
         {draftCapable.length > 0 && (
           <label className="draft-toggle">
             <input type="checkbox" checked={asDraft} onChange={(e) => setAsDraft(e.target.checked)} />
-            <span>存草稿（{draftCapable.map((p) => p.label).join('、')} 进平台草稿箱，不公开发布；同批次的其它平台仍会真发布）</span>
+            <span>仅保存到{draftCapable.map(p => p.label).join('、')}草稿箱</span>
           </label>
         )}
 
@@ -422,19 +446,19 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
               <IconSkills size={14} /> 一键适配各平台
             </button>
           )}
-          <button className="btn btn-sm" disabled={empty || checking || adapting} onClick={check}>
+          <button className="btn btn-sm" disabled={empty || checking || adapting || !canPublish} onClick={check}>
             <IconCheck size={14} /> {checking ? '预检中…' : '发布前预检'}
           </button>
-          <button className="btn btn-sm" disabled={empty || !schedulePlatform} onClick={() => addToCalendar(platformCapability(schedulePlatform)!.key)}>
-            <IconCalendar size={14} /> 存草稿并排期
+          <button className="btn btn-sm" disabled={!schedulePlatform || !effectiveTitle(platformCapability(schedulePlatform)!.key).trim()} onClick={() => addToCalendar(platformCapability(schedulePlatform)!.key)}>
+            <IconCalendar size={14} /> 保存到内容日历
           </button>
           <button className="btn btn-sm btn-primary" disabled={empty || publishing || checking || !canPublish}
             title={canPublish ? '真实发布到已登录平台' : '所选平台无一键发布（B站走终端 biliup）'}
             onClick={publishAll}>
-            <IconPublish size={14} /> {publishing ? '发布中…' : '一键发布'}
+            <IconPublish size={14} /> {publishing ? (asDraft ? '保存中…' : '发布中…') : asDraft ? '保存到草稿箱' : '一键发布'}
           </button>
           <button className="btn btn-sm btn-ghost" disabled={empty || adapting}
-            onClick={() => { setProjectSource(undefined); setTitle(''); setBody(''); setTags(''); setOverrides({}); setCheckResult(''); setPub({}); showToast('已清空'); }}>
+            onClick={() => { setProjectSource(undefined); setSchedule(undefined); setTitle(''); setPlatformTitles({}); setBody(''); setTags(''); setOverrides({}); setCheckResult(''); setPub({}); showToast('已清空'); }}>
             <IconTrash size={13} /> 清空
           </button>
         </div>
@@ -453,7 +477,8 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
         {PLATFORMS.filter((p) => platforms.includes(p.key)).map((p) => {
           const text = effective(p.key);
           const over = text.length > p.bodyLimit;
-          const titleOver = p.titleLimit != null && title.length > p.titleLimit;
+          const platformTitle = effectiveTitle(p.key);
+          const titleOver = !!p.titleLimit && [...platformTitle.trim()].length > p.titleLimit;
           const isEdit = editing === p.key;
           const ps = pub[p.key];
           const publishable = PUBLISHABLE.has(p.key);
@@ -471,9 +496,13 @@ function PersonaPublishPage({ persona, projectDraft }: PublishPageProps) {
                 <span className={`pv-count ${over ? 'over' : ''}`}>{text.length}/{p.bodyLimit}</span>
               </div>
               <div className="pv-body">
-                {p.titleLimit != null && (
-                  <div className={`pv-title ${titleOver ? 'over' : ''}`}>{title || <span className="pv-ph">标题…</span>}</div>
-                )}
+                <div className={`pv-title article-title-field ${titleOver ? 'over' : ''}`}>
+                  {isEdit ? <input className="field" aria-label={`${p.label}文章标题`} value={platformTitles[p.key] || ''}
+                    placeholder={title || '沿用文章标题'} onChange={e => setPlatformTitles(current => ({...current, [p.key]: e.target.value}))} />
+                    : <span>{platformTitle || <span className="pv-ph">标题预览</span>}</span>}
+                  {p.draftEditor && <ArticleTitleAssistant title={platformTitle} body={text} persona={persona} platform={p}
+                    disabled={adapting || publishing} onApply={value => setPlatformTitles(current => ({...current, [p.key]: value}))} />}
+                </div>
                 {isEdit
                   ? <textarea className="field" style={{ minHeight: 120 }} value={text} autoFocus
                       onChange={(e) => setOverrides((o) => ({ ...o, [p.key]: e.target.value }))} />

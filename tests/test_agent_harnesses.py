@@ -13,12 +13,51 @@ from easel.harnesses import store
 from easel.harnesses.acp import ACPAdapter
 from easel.harnesses.base import HarnessError, RunRequest
 from easel.harnesses.codex import CodexAdapter
+from easel.harnesses import codex_state
 from easel.harnesses.commands import acp_command, base_command
 from easel.harnesses.rpc import RPC
 from easel.harnesses import models as native_models
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "harness_rpc.py"
+
+
+@pytest.fixture(autouse=True)
+def isolate_codex_test_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "desktop"))
+    monkeypatch.setattr(codex_state, "_state_home", lambda workspace: tmp_path / "easel-state")
+
+
+def test_codex_keeps_model_settings_and_imports_only_the_bound_rollout(tmp_path):
+    desktop = tmp_path / "desktop"
+    source = desktop / "archived_sessions"
+    source.mkdir(parents=True)
+    target_id = "019abcd0-1111-7222-8333-444455556666"
+    other_id = "019abcd0-1111-7222-8333-444455557777"
+    name = f"rollout-2026-11-23T09-15-00-{target_id}.jsonl"
+    (source / name).write_text("bound history", encoding="utf-8")
+    (source / name.replace(target_id, other_id)).write_text("unrelated thread", encoding="utf-8")
+    (desktop / "auth.json").write_text("private data", encoding="utf-8")
+    settings = ('model_provider = "fixture"\n[model_providers.fixture]\nname = "Fixture"\n'
+                '[projects.example]\ntrust_level = "trusted"\n[mcp_servers.example]\ncommand = "fixture"\n')
+    (desktop / "config.toml").write_text(settings, encoding="utf-8")
+    request = RunRequest("hello", tmp_path, {
+        "CODEX_HOME": str(desktop), "CODEX_SQLITE_HOME": str(desktop / "db"),
+        "CODEX_THREAD_ID": other_id, "CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop",
+    }, native_id=target_id)
+    environment, rollout = codex_state.isolated_environment(request)
+    isolated = tmp_path / "easel-state"
+    assert environment == {"CODEX_HOME": str(isolated), "CODEX_SQLITE_HOME": str(isolated)}
+    assert rollout == isolated / "sessions" / "2026" / "11" / "23" / name
+    assert rollout.read_text(encoding="utf-8") == "bound history"
+    assert list(isolated.rglob("*.jsonl")) == [rollout]
+    assert not (isolated / "auth.json").exists()
+    config = (isolated / "config.toml").read_text(encoding="utf-8")
+    assert 'model_provider = "fixture"' in config and '[model_providers.fixture]' in config
+    assert "[projects" not in config and "[mcp_servers" not in config
+    rollout.write_text("continued inside Easel", encoding="utf-8")
+    assert codex_state.isolated_environment(request)[1].read_text(encoding="utf-8") == "continued inside Easel"
+    assert (source / name).read_text(encoding="utf-8") == "bound history"
 
 
 def test_codex_model_catalog_paginates_without_creating_a_session(tmp_path, monkeypatch):

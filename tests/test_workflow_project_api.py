@@ -87,8 +87,8 @@ def test_wechat_success_is_draft_not_published(setup,monkeypatch):
     sid=client.post('/api/schedule',json=data).json()['id']
     cover=out/'cover.jpg';cover.write_bytes(b'test-image')
     def run(cmd,**kwargs):
-        if '-o' in cmd:Path(cmd[cmd.index('-o')+1]).write_text('<html>test</html>')
-        return SimpleNamespace(returncode=0,stdout='{}',stderr='')
+        assert '--exec' not in cmd
+        return SimpleNamespace(returncode=0,stdout='{"success":true,"media_id":"fixture-draft"}',stderr='')
     monkeypatch.setattr(web,'PUBLISH_DIR',out/'_publish')
     monkeypatch.setattr(web,'_mp_login_status',lambda:{'state':'success'})
     monkeypatch.setattr(web,'profile_exists',lambda name:name=='测试')
@@ -102,3 +102,47 @@ def test_wechat_success_is_draft_not_published(setup,monkeypatch):
     items=client.get('/api/schedule').json()
     assert len(items)==1 and items[0]['id']==sid and items[0]['status']=='scheduled'
     assert items[0]['publication_status']=='draft'
+
+
+@pytest.mark.parametrize(('platform', 'label', 'receipt'), [
+    ('wechat-oa', '公众号', {'success': True, 'media_id': 'wx-draft'}),
+    ('toutiao', '今日头条', {'draft_saved': True}),
+])
+def test_reviewed_calendar_draft_updates_exact_row_without_publication(setup, monkeypatch, platform, label, receipt):
+    from types import SimpleNamespace
+    client, data, out = setup
+    (out / 'cover.jpg').write_bytes(b'test-image')
+    data.update(platform=label, draft_content={'body': '旧正文', 'tags': '旧标签', 'media': ['cover.jpg'], 'persona': '测试'})
+    first = client.post('/api/schedule', json=data).json()
+    second = client.post('/api/schedule', json={**data, 'time': '10:00'}).json()
+    monkeypatch.setattr(web, 'PUBLISH_DIR', out / '_publish')
+    monkeypatch.setattr(web, '_mp_login_status', lambda: {'state': 'success'})
+    monkeypatch.setattr(web, 'profile_exists', lambda name: name == '测试')
+    monkeypatch.setattr(web, '_proxy_env', lambda: {})
+    monkeypatch.setattr(web, '_publish_env', lambda: {})
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        assert '--exec' not in command
+        if platform == 'toutiao':
+            assert '--draft' in command
+        return SimpleNamespace(returncode=0, stdout=json.dumps(receipt), stderr='')
+
+    monkeypatch.setattr(web.subprocess, 'run', run)
+    payload = {key: data[key] for key in ('persona', 'task_id', 'version_id')}
+    payload.update(schedule_id=second['id'], title='文章标题', body='新正文', tags='新标签', media=['cover.jpg'])
+    endpoint = f'/api/platform-drafts/{platform}'
+    assert client.post(endpoint, json=payload).status_code == 400
+    assert client.post('/api/platform-drafts/zhihu', json={**payload, 'reviewed': True}).status_code == 400
+    for _ in range(2):
+        result = client.post(endpoint, json={**payload, 'reviewed': True})
+        assert result.status_code == 200 and result.json()['ok'], result.text
+    assert len(commands) == 1
+    rows = {row['id']: row for row in client.get('/api/schedule').json()}
+    assert rows[first['id']] == first
+    saved = rows[second['id']]
+    assert saved['title'] == '文章标题'
+    assert saved['time'] == '10:00' and saved['status'] == 'scheduled'
+    assert saved['publication_status'] == 'draft'
+    assert saved['draft_content']['body'] == '新正文'

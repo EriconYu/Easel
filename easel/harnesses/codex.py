@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from easel import __version__
 
 from .base import Descriptor, HarnessError, RunRequest
 from .commands import base_command
+from .codex_state import isolated_environment
 from .permissions import can_auto_approve
 from .rpc import connection
 from .workspace import harness_instructions
@@ -106,6 +108,8 @@ class CodexAdapter:
             raise HarnessError("不支持的 Codex 客户端请求")
 
         command = list(request.command) if request.command else base_command("codex") + ["app-server"]
+        env, rollout = await asyncio.to_thread(isolated_environment, request)
+        request = replace(request, env=env)
         async with connection(request, command, notify, respond) as rpc:
             if rpc.initialized is None:
                 rpc.initialized = await rpc.call("initialize", {
@@ -122,6 +126,8 @@ class CodexAdapter:
             if thread_id and rpc.native_id == thread_id and request.web_search is None:
                 result = {"thread": {"id": thread_id}}
             elif thread_id:
+                if rollout is not None:
+                    options["path"] = str(rollout)
                 result = await rpc.call("thread/resume", {**options, "threadId": thread_id})
             else:
                 result = await rpc.call("thread/start", options)

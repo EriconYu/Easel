@@ -55,6 +55,7 @@ export function mountApp({stored, catalog = [{name:'甲', description:''}], sess
         if(name.endsWith('/api')) return api;
         if(name.endsWith('/personas')) return load('lib/personas.ts');
         if(name.endsWith('/store')) return load('lib/store.ts');
+        if(name.endsWith('/article')) return load('lib/article.ts');
         if(name.includes('/components/')) {
           const key=name.split('/').at(-1);
           components[key] ??= {__esModule:true, default: function component(){}};

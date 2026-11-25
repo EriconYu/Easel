@@ -25,7 +25,7 @@ export function harness(file, api, props, {storage=memoryStorage(),confirm=()=>t
     const exports={};modules[path]=exports;
     runInNewContext(ts.transpileModule(read(path),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,
       {exports,Error,Date,Set,Map,fetch:async()=>({json:async()=>({})}),localStorage:storage,window,setTimeout:()=>0,clearTimeout(){},CustomEvent:class{},require:name=>name==='react'?react:name==='react/jsx-runtime'?jsx:name.endsWith('/api')?api:
-        name.endsWith('/editorDrafts')?load('lib/editorDrafts.ts'):name.endsWith('/requestLifecycle')?load('lib/requestLifecycle.ts'):
+        name.endsWith('/editorDrafts')?load('lib/editorDrafts.ts'):name.endsWith('/article')?load('lib/article.ts'):name.endsWith('/requestLifecycle')?load('lib/requestLifecycle.ts'):
         name.endsWith('/sanitize')?{renderMarkdown:value=>value}:name.endsWith('/skillDisplayNames')?{displayName:value=>value}:
         name.endsWith('/whoami')?{getWhoamiCache:()=>({}),verifyStale:()=>{}}:{}});
     return exports;

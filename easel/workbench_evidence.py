@@ -206,10 +206,10 @@ def session_web_policy(persona, session_id):
     """Only a server-bound task can enable or disable native web tools."""
     with state._LOCK:
         data = state._read(persona)
-        for task in data['tasks']:
-            if task.get('session_id') == session_id:
-                brief = data.get('briefs', {}).get(task['task_id'], {})
-                return bool(brief.get('allow_web') and not brief.get('strict_mode', True))
+        task = task_for_session(data, session_id)
+        if task:
+            brief = data.get('briefs', {}).get(task['task_id'], {})
+            return bool(brief.get('allow_web') and not brief.get('strict_mode', True))
     return None
 
 
@@ -239,10 +239,7 @@ def brief_context(persona, task_id):
     return '\n专业资料与创作约束：' + rules + '\n' + json.dumps(brief, ensure_ascii=False, indent=2)
 
 
-def _version_directory(persona, task_id):
-    with state._LOCK:
-        data = state._read(persona)
-        state._card(data, task_id)
+def _version_directory(task_id):
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', task_id):
         raise ValueError('无效任务ID')
     # Output trust boundary is the configured real store, never a caller-supplied path.
@@ -280,6 +277,13 @@ def generation_snapshot(persona, task_id):
         return identifier
 
 
+def task_for_session(data, session_id):
+    matches = [task for task in data['tasks'] if task.get('session_id') == session_id]
+    if len(matches) > 1:
+        raise ValueError('会话关联多个项目，无法确定所属项目')
+    return matches[0] if matches else None
+
+
 def capture_turn(persona, session_id, turn_id, message):
     """Bind known prompt inputs to a real turn, scoped to its server-owned project.
 
@@ -288,18 +292,15 @@ def capture_turn(persona, session_id, turn_id, message):
     does not retroactively become evidence for an answer using conversation history.
     Legacy conversations with no snapshot remain explicitly unverified.
     """
-    if not state.valid_persona_name(persona) or not state.profile_exists(persona):
+    if persona != '' and not state.profile_exists(persona):
         # Ordinary chat has no project to snapshot; its own persona validation
         # remains at the chat boundary.
         return
     with state._LOCK:
         data = state._read(persona)
-        matches = [t for t in data['tasks'] if t.get('session_id') == session_id]
-        if not matches:
+        task = task_for_session(data, session_id)
+        if not task:
             return
-        if len(matches) != 1:
-            raise ValueError('会话关联多个项目，无法确定稿件依据')
-        task = matches[0]
         turns = task.setdefault('turn_provenance', {})
         if turn_id in turns:
             return
@@ -338,16 +339,14 @@ def finish_turn(persona, session_id, turn_id, status, *, history_unchanged=False
     """
     if status not in {'completed', 'failed', 'cancelled'}:
         raise ValueError('无效对话轮次状态')
-    if not state.valid_persona_name(persona) or not state.profile_exists(persona):
+    if persona != '' and not state.profile_exists(persona):
         return
     with state._LOCK:
         data = state._read(persona)
-        matches = [t for t in data['tasks'] if t.get('session_id') == session_id]
-        if not matches:
+        task = task_for_session(data, session_id)
+        if not task:
             return
-        if len(matches) != 1:
-            raise ValueError('会话关联多个项目，无法确定稿件依据')
-        record = matches[0].get('turn_provenance', {}).get(turn_id)
+        record = task.get('turn_provenance', {}).get(turn_id)
         if record is None or record.get('status') != 'pending':
             return
         record.update(status=status, history_unchanged=bool(history_unchanged) if status != 'completed' else False)
@@ -379,11 +378,16 @@ def _version_source(task, card, brief, source_version_id, source_turn_id, versio
     return _source_snapshot(card, task, brief), {'kind': 'manual_declared'}
 
 
-def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None):
+def _version_text(name, text):
     name = state._text(name, 120)
     text = state._text(text, 200000)
     if not name or not text or '/' in name or '\\' in name:
         raise ValueError('请填写合法版本名和实际稿件正文')
+    return name, text
+
+
+def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None, article_title=None):
+    name, text = _version_text(name, text)
     with state._LOCK:
         data = state._read(persona)
         card, existing = state._card(data, task_id)
@@ -391,31 +395,88 @@ def save_version(persona, task_id, name, text, *, source_version_id=None, source
             state.save_task(persona, {'task_id': task_id, 'status': 'todo'})
             data = state._read(persona)
             card, existing = state._card(data, task_id)
-        identifier = uuid.uuid4().hex
-        directory = _version_directory(persona, task_id)
-        filename = directory / f'稿件版本-{identifier}.md'
-        brief = load_brief(persona, task_id)
-        snapshot, provenance = _version_source(existing, card, brief, source_version_id, source_turn_id,
-                                               data.get('versions', {}).get(task_id, []))
-        value = {'id': identifier, 'task_id': task_id, 'name': name, 'text': text,
-                 'path': filename.relative_to(state.ROOT.parent).as_posix(),
-                 'created_at': state.now(), **snapshot, 'provenance': provenance,
-                 'declared_brief': copy.deepcopy(brief)}
-        # Exclusive create: same display name never overwrites any earlier version.
+        return _write_version(persona, data, existing, name, text, source_version_id, source_turn_id,
+                              article_title=article_title)
+
+
+def _write_version(persona, data, task, name, text, source_version_id, source_turn_id, *, chat_reply_id=None, article_title=None):
+    task_id = task['task_id']
+    identifier = uuid.uuid4().hex
+    brief = {**DEFAULT_BRIEF, **data.get('briefs', {}).get(task_id, {})}
+    versions = data.setdefault('versions', {}).setdefault(task_id, [])
+    snapshot, provenance = _version_source(task, task['card'], brief, source_version_id, source_turn_id, versions)
+    if source_version_id and article_title is None:
+        source_version = next(version for version in versions if version['id'] == source_version_id)
+        article_title = source_version.get('article_title')
+    if chat_reply_id:
+        if not source_turn_id:
+            snapshot = {'brief': None, 'evidence': [], 'inspiration': None,
+                        'inspiration_references': [], 'inspiration_adoption': []}
+            provenance = {'kind': 'unverified_turn', 'turn_status': 'unknown'}
+        provenance.update(source_session_id=task['session_id'], chat_reply_id=chat_reply_id)
+    directory = _version_directory(task_id)
+    filename = directory / f'稿件版本-{identifier}.md'
+    manifest = filename.with_suffix('.json')
+    value = {'id': identifier, 'task_id': task_id, 'name': name, 'text': text,
+             'path': filename.relative_to(state.ROOT.parent).as_posix(),
+             'created_at': state.now(), **snapshot, 'provenance': provenance,
+             'declared_brief': copy.deepcopy(brief)}
+    if article_title is not None:
+        value['article_title'] = state._text(article_title, 120)
+    created = []
+    try:
         with filename.open('x', encoding='utf-8') as stream:
+            created.append(filename)
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        manifest = filename.with_suffix('.json')
+        with manifest.open('x', encoding='utf-8') as stream:
+            created.append(manifest)
+            json.dump({k: v for k, v in value.items() if k != 'text'}, stream, ensure_ascii=False, indent=2)
+        versions.append(value)
+        state._write(persona, data)
+    except Exception:
+        if not chat_reply_id and filename in created:
+            raise ValueError('稿件文件已保存但索引失败，请保留原文件并检查存储') from None
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
         try:
-            with manifest.open('x', encoding='utf-8') as stream:
-                json.dump({k:v for k,v in value.items() if k != 'text'}, stream, ensure_ascii=False, indent=2)
-            data.setdefault('versions', {}).setdefault(task_id, []).append(value)
-            state._write(persona, data)
-        except Exception:
-            # Preserve the generated text even if indexing fails; never overwrite or delete drafts.
-            raise ValueError('稿件文件已保存但索引失败，请保留原文件并检查存储')
-        return value
+            directory.rmdir()
+        except OSError:
+            pass
+        raise
+    return value
+
+
+def save_chat_reply(persona, session_id, reply_id, title, text, *, turn_id=None, article_title=''):
+    name, text = _version_text('对话稿', text)
+    article_title = state._text(article_title, 120)
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,160}', session_id) or not re.fullmatch(r'[A-Za-z0-9_-]{1,160}', reply_id):
+        raise ValueError('无效的会话或回复标识')
+    with state._LOCK:
+        data = state._read(persona)
+        task = task_for_session(data, session_id)
+        if task is None:
+            title = state._text(title, 120)
+            if not title:
+                raise ValueError('请填写项目名称')
+            card = {'task_id': str(uuid.uuid4()), 'key': state._key(title), 'title': title, 'sources': [],
+                    'platforms': ['通用'], 'evergreen': False, 'relevance_reason': '', 'angle': '', 'risk': ''}
+            task = state.new_task(card, {'intent': title, 'exclude': [], 'budget': 0})
+            task.update(session_id=session_id, source='chat', status='doing', updated_at=state.now())
+            data['tasks'].append(task)
+        record = task.get('turn_provenance', {}).get(turn_id, {})
+        if record.get('status') in {'pending', 'failed', 'cancelled'}:
+            raise ValueError('此回复尚未完成，无法保存为稿件')
+        previous = next((version for version in data.get('versions', {}).get(task['task_id'], [])
+                         if version.get('provenance', {}).get('chat_reply_id') == reply_id
+                         and version['text'] == text and version.get('article_title', '') == article_title), None)
+        if previous:
+            return {'task': task, 'version': previous}
+        task['updated_at'] = state.now()
+        version = _write_version(persona, data, task, name, text, None, turn_id,
+                                 chat_reply_id=reply_id, article_title=article_title or None)
+        return {'task': task, 'version': version}
 
 
 def list_versions(persona, task_id):

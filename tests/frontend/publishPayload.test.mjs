@@ -13,12 +13,15 @@ for(const file of ['PublishPage','ManualPublishPage'])test(file+'切换画像销
  if(file==='ManualPublishPage')assert.equal(h.input('X人工审核').props.checked,false);
 });
 test('自动发布逐平台预检最终正文、标签与素材，提交使用同一冻结载荷',async()=>{
- const h=publishHarness('PublishPage');h.store.savePublishDraft(draft,'甲');await h.flush();
+ const platformTitles = {juejin:'掘金专用标题'};
+ const h=publishHarness('PublishPage');h.store.savePublishDraft({...draft,platformTitles},'甲');await h.flush();
  await h.button('一键发布').props.onClick();
  const checks=h.calls.filter(c=>c[0]==='general');assert.equal(checks.length,2);
  for(const [key,text]of Object.entries(draft.overrides)){
   assert.ok(checks.some(c=>c[1].includes(text)&&c[1].includes('待审标签')));
   const payload=h.calls.find(c=>c[0]==='publish'&&c[1]===key)[2];assert.equal(payload.body,text);assert.equal(payload.tags,draft.tags);assert.equal(payload.persona,'甲');assert.ok(Object.isFrozen(payload));assert.ok(Object.isFrozen(payload.media));
+  assert.equal(payload.title, platformTitles[key] || draft.title);
+  assert.ok(checks.some(call => call[1].includes(text) && call[1].includes(JSON.stringify(payload.title))));
  }
  assert.equal(checks.some(c=>c[1].includes('母稿')),false);
 });

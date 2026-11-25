@@ -8,6 +8,8 @@ export interface ChatMessage {
   thinking?: string;   // 模型思考过程（隐思考），流式结束后持久保留
   activity?: string;   // 工具/执行活动步骤（换行分隔），持久保留
   questions?: ChatQuestion[];
+  turnId?: string;
+  incomplete?: boolean;
 }
 
 export interface ChatSession {
@@ -35,9 +37,14 @@ export interface PublishDraft {
   project_source?: {persona:string;task_id:string;version_id:string};
   title: string;
   body: string;
+  articleTitleSet?: boolean;
   platforms: string[];
+  platformTitles?: Record<string, string>;
   overrides: Record<string, string>;
   tags: string;   // 话题标签，逗号分隔（小红书绑话题；其它平台按需写入）
+  theme?: string;
+  media?: string[];
+  schedule?: { id: string; platform: string };
 }
 const PUBLISH_KEY = 'easel_publish_draft';
 const PREVIOUS_BRAND = ['post', 'craft'].join('');
@@ -82,7 +89,13 @@ export function loadPublishDraft(persona = ''): PublishDraft {
       || Object.values(value.overrides).some(text => typeof text !== 'string')
       || (value.project_source && value.project_source.persona !== persona)) return emptyPublishDraft();
     return { title: value.title, body: value.body, platforms: value.platforms, overrides: value.overrides,
-      tags: typeof value.tags === 'string' ? value.tags : '', project_source: value.project_source };
+      articleTitleSet: value.articleTitleSet === true ? true : undefined,
+      platformTitles: value.platformTitles && typeof value.platformTitles === 'object' && !Array.isArray(value.platformTitles)
+        ? Object.fromEntries(Object.entries(value.platformTitles).filter(([, title]) => typeof title === 'string')) : undefined,
+      tags: typeof value.tags === 'string' ? value.tags : '', project_source: value.project_source,
+      theme: typeof value.theme === 'string' ? value.theme : undefined,
+      media: Array.isArray(value.media) ? value.media.filter(path => typeof path === 'string') : undefined,
+      schedule: typeof value.schedule?.id === 'string' && typeof value.schedule.platform === 'string' ? value.schedule : undefined };
   } catch {
     return emptyPublishDraft();
   }
@@ -136,8 +149,9 @@ export function createPublishSnapshot(d: PublishDraft, persona: string, media: s
   return Object.freeze(targets.map(target => {
     const files = [...media];
     Object.freeze(files);
-    const payload = Object.freeze({ ...d.project_source, persona, title: d.title,
-      body: d.overrides[target.key] ?? d.body, tags: d.tags, media: files, draft: asDraft && !!target.draft });
+    const payload = Object.freeze({ ...d.project_source, persona, title: d.platformTitles?.[target.key]?.trim() || d.title,
+      body: d.overrides[target.key] ?? d.body, tags: d.tags, media: files, draft: asDraft && !!target.draft,
+      ...(target.key === 'wechat-oa' && d.theme ? {theme: d.theme} : {}) });
     return Object.freeze({ platform: target.key, payload });
   }));
 }

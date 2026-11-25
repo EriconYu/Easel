@@ -7,7 +7,7 @@ test('平台能力分离：11个平台可创作排期，微博不假称发布集
  for(const label of ['X','掘金','快手','今日头条']) {
   const p=registry.platformCapability(label);assert.ok(p.creation&&p.schedule&&p.manual&&p.automated);
  }
- const p=registry.platformCapability('微博');assert.ok(p.creation&&p.schedule&&!p.manual&&!p.automated);
+ const p=registry.platformCapability('微博');assert.ok(p.creation&&p.schedule&&p.manual&&p.draftEditor&&!p.automated);
  for(const [alias,label]of [['微信公众号','公众号'],['微信视频号','视频号'],['推特 X','X']])assert.equal(registry.platformCapability(alias).label,label);
  for(const file of ['PublishPage','ManualPublishPage','ContentWorkspace','CalendarPage','WorkbenchPanel'])assert.match(read('components/'+file+'.tsx'),/from ['"]\.\.\/lib\/platformCapabilities['"]/);
 });

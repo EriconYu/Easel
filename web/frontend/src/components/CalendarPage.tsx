@@ -14,7 +14,7 @@ const EVENT_TYPES = ['节日', '电商', '平台活动', '行业'];
 const SOURCE_LABEL: Record<string, string> = {
   chat: '对话页', 'publish-page': '发布页', manual: '手动', scheduler: '排期',
 };
-import { SCHEDULE_PLATFORMS, platformNotice } from '../lib/platformCapabilities';
+import { SCHEDULE_PLATFORMS, platformCapability, platformNotice } from '../lib/platformCapabilities';
 const PLATFORMS = SCHEDULE_PLATFORMS;
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
 type Filter = 'all' | 'content' | 'event';
@@ -31,9 +31,10 @@ const EMPTY: ScheduleInput = {
 
 interface Props {
   onOpenProject?: (persona: string, taskId: string) => Promise<void>;
+  onOpenDraft?: (item: ScheduleItem) => Promise<void>;
 }
 
-export default function CalendarPage({ onOpenProject }: Props) {
+export default function CalendarPage({ onOpenProject, onOpenDraft }: Props) {
   const today = useMemo(() => new Date(), []);
   const [cursor, setCursor] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
   const [items, setItems] = useState<ScheduleItem[]>([]);
@@ -105,7 +106,7 @@ export default function CalendarPage({ onOpenProject }: Props) {
         onClick={(e) => { e.stopPropagation(); openEdit(it); }}>
         <span className="cal-event-dot" />
         <span className="cal-event-title">{it.platform ? `[${it.platform}] ` : ''}{it.title}</span>
-        {it.persona && it.task_id && <span className="cal-src">关联内容项目</span>}
+        {it.task_id && <span className="cal-src">关联内容项目</span>}
         {it.status === 'published' && it.source && SOURCE_LABEL[it.source]
           && <span className="cal-src">{SOURCE_LABEL[it.source]}</span>}
       </div>
@@ -131,12 +132,22 @@ export default function CalendarPage({ onOpenProject }: Props) {
   const shift = (n: number) => setCursor((c) => new Date(c.getFullYear(), c.getMonth() + n, 1));
   const todayStr = ymd(today);
   const isEvent = form?.kind === 'event';
-  const linkedForm = !isEvent && !!form?.persona && !!form?.task_id;
+  const linkedForm = !isEvent && !!form?.task_id;
+  const canOpenDraft = editing && editing.status !== 'published' && kindOf(editing) === 'content'
+    && platformCapability(editing.platform)?.manual
+    && (editing.draft_content?.body || (editing.status === 'draft' && editing.note) || editing.version_id);
   const openProject = async () => {
-    if (!linkedForm || !form?.persona || !form?.task_id || !onOpenProject) return;
+    if (!linkedForm || !form?.task_id || !onOpenProject) return;
     setProjectError(''); setOpeningProject(true);
-    try { await onOpenProject(form.persona, form.task_id); }
+    try { await onOpenProject(form.persona || '', form.task_id); }
     catch (error) { setProjectError(error instanceof Error ? error.message : '无法打开内容项目'); }
+    finally { setOpeningProject(false); }
+  };
+  const openDraft = async () => {
+    if (!editing || !onOpenDraft) return;
+    setProjectError(''); setOpeningProject(true);
+    try { await onOpenDraft(editing); }
+    catch (error) { setProjectError(error instanceof Error ? error.message : '无法打开日历稿件'); }
     finally { setOpeningProject(false); }
   };
   const suggestions = ctx?.suggestions || [];
@@ -251,12 +262,18 @@ export default function CalendarPage({ onOpenProject }: Props) {
             {linkedForm && (
               <div style={{ marginTop: 12, overflowWrap: 'anywhere' }}>
                 <div className="field-label">关联内容项目</div>
-                <div>{form.persona} · {form.task_id}</div>
+                <div>{form.persona || '通用模式'} · {form.task_id}</div>
                 <div>版本：{form.version_id || '未指定版本'}</div>
                 {onOpenProject && <button className="btn btn-sm" disabled={openingProject} onClick={openProject}>回到项目</button>}
-                {projectError && <div role="alert">{projectError}</div>}
               </div>
             )}
+            {editing?.publication_status === 'draft' && <p role="status">
+              {editing.platform_draft_source === 'manual' ? '已人工确认平台草稿' : '平台草稿箱已保存'}
+            </p>}
+            {canOpenDraft && onOpenDraft && <button type="button" className="btn btn-sm" disabled={openingProject || saving} onClick={openDraft}>
+              打开发布草稿
+            </button>}
+            {projectError && <div role="alert">{projectError}</div>}
             <label className="field-label">标题 *</label>
             <input className="field" value={form.title} autoFocus placeholder={isEvent ? '活动/节点名称' : '要发什么内容'}
               onChange={(e) => setForm({ ...form, title: e.target.value })} />

@@ -4,11 +4,13 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+from dataclasses import replace
 
 from easel import __version__
 
 from .base import HarnessError, RunRequest
 from .commands import base_command
+from .codex_state import isolated_environment
 from .rpc import RPC
 
 
@@ -24,6 +26,8 @@ async def available_models(runtime: str, request: RunRequest) -> list[dict]:
 
         models = []
         cursor = None
+        env, _ = await asyncio.to_thread(isolated_environment, request)
+        request = replace(request, env=env)
         async with RPC(request, base_command("codex") + ["app-server"],
                        lambda method, params: None, reject) as rpc:
             await rpc.call("initialize", {

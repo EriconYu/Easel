@@ -5,14 +5,15 @@ import {createRequire} from 'node:module';
 import {runInNewContext} from 'node:vm';
 import {loadLibrary} from './publishHarness.mjs';
 const platformRegistry = loadLibrary('lib/platformCapabilities.ts');
+const article = loadLibrary('lib/article.ts');
 const require = createRequire(new URL('../../web/frontend/package.json', import.meta.url));
 const ts = require('typescript');
 const componentPath = new URL('../../web/frontend/src/components/ContentWorkspace.tsx', import.meta.url);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const task = {task_id:'a', title:'关系变化', status:'doing', note:'原备注', output_path:'outputs/a/',
   card:{sources:[{platform:'热榜甲', url:'https://example.com/story', evidence:'原始线索'}], platforms:['公众号']}};
-const versions = [{id:'v1',name:'初稿',text:'第一稿真实文本',created_at:'2026-11-18'},
-  {id:'v2',name:'修订稿',text:'第二稿真实文本',created_at:'2026-11-19'}];
+const versions = [{id:'v1',name:'初稿',text:'**等风来的日子，也要把日子过好**\n\n第一稿真实文本',created_at:'2026-11-18'},
+  {id:'v2',name:'修订稿',article_title:'第二稿文章标题',text:'第二稿真实文本',created_at:'2026-11-19'}];
 function harness(overrides = {}, initial = {}) {
   assert.ok(existsSync(componentPath), 'ContentWorkspace.tsx must implement the existing-task workspace');
   const calls = [], instances = new Map(); let current, cursor;
@@ -36,7 +37,7 @@ function harness(overrides = {}, initial = {}) {
   const outputs=()=>null, editor=()=>null, exports={};
   runInNewContext(ts.transpileModule(readFileSync(componentPath,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,target:ts.ScriptTarget.ES2022}}).outputText,
     {exports,Error,Date,Set,require:name=>name==='react'?react:name==='react/jsx-runtime'?jsx:name==='../lib/api'?api:
-      name==='../lib/platformCapabilities'?platformRegistry:name==='./OutputsPage'?{__esModule:true,default:outputs}:name==='./WorkbenchDiscussion'?{DiscussionEditor:editor}:{}});
+      name==='../lib/platformCapabilities'?platformRegistry:name==='./OutputsPage'?{__esModule:true,default:outputs}:name==='./WorkbenchDiscussion'?{DiscussionEditor:editor}:name==='../lib/article'?article:{}});
   let nodes=[];
   const render=()=>{
     nodes=[]; const visited=new Set();
@@ -110,7 +111,9 @@ test('从真实历史版本交付精确 ID 与文本，刷新不会重建编辑�
   h.button('交给发布页').props.onClick();
   const draft=h.calls.find(c=>c[0]==='prepare')[1];
   assert.equal(draft.task_id,'a');assert.equal(draft.persona,'甲');assert.equal(draft.version_id,'v1');
-  assert.equal(draft.title,'关系变化');assert.equal(draft.text,'第一稿真实文本');
+  assert.equal(draft.title,'等风来的日子，也要把日子过好');assert.equal(draft.text,'第一稿真实文本');
+  assert.equal(draft.versionName, '初稿');
+  assert.equal(draft.platform, '公众号');
   assert.equal(h.calls.some(c=>c[0]==='save'||c[0]==='schedule'),false);
   const editor=h.render().find(n=>n.type===h.editor);
   items=[...versions,{id:'v3',name:'另存新稿',text:'真实新稿',created_at:'2026-11-20'}];
@@ -144,7 +147,7 @@ test('排期必须明确选择日期、时间、平台和版本，创建后按�
   await h.button('创建项目排期').props.onClick();await h.flush();
   const payload=h.calls.find(c=>c[0]==='schedule')[1];
   assert.equal(payload.persona,'甲');assert.equal(payload.task_id,'a');assert.equal(payload.version_id,'v2');
-  assert.equal(payload.title,'关系变化');assert.equal(payload.date,'2026-12-01');assert.equal(payload.time,'09:35');
+  assert.equal(payload.title,'第二稿文章标题');assert.equal(payload.date,'2026-12-01');assert.equal(payload.time,'09:35');
   assert.equal(payload.platform,'公众号');assert.equal(payload.status,'scheduled');assert.equal(payload.kind,'content');
   assert.equal(payload.source,'manual');assert.equal(payload.url,'');
   assert.equal(h.calls.filter(c=>c[0]==='readSchedule').length,1);

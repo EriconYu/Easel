@@ -10,6 +10,7 @@ export interface BubbleActions {
   onCopy: () => void;
   onRetry?: () => void;    // 仅最后一轮可用（append-only：不改写历史）
   canModify: boolean;      // 流式中禁用 retry
+  onSave?: () => void;
 }
 
 interface MessageBubbleProps {
@@ -126,6 +127,7 @@ export default function MessageBubble({ message, isStreaming, thinking, activity
           {isStreaming && <span className="streaming-cursor" />}
         </div>
         {actions && !isStreaming && <ActionBar actions={actions} />}
+        {actions?.onSave && !isStreaming && <button type="button" className="msg-save" onClick={actions.onSave}>保存到内容库</button>}
       </div>
     </div>
   );

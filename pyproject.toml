@@ -27,6 +27,8 @@ dependencies = [
     # 只用到 load_pem_private_key + Ed25519.sign（长期稳定 API），上界放宽避免与新版冲突
     "websocket-client>=1.7,<2",
     "cryptography>=42",
+    "tomli>=2,<3; python_version < '3.11'",
+    "tomli-w>=1,<2",
 ]
 
 [project.scripts]

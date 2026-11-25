@@ -90,7 +90,7 @@ def test_wechat_html_is_formatted_without_active_content(tmp_path):
         "[链接](javascript:alert(1))\n\n![远程图](https://example.org/private.png)"), "", [], True)
     with zipfile.ZipFile(package) as archive:
         article = archive.read("article.html").decode()
-    assert "<h2>小标题</h2>" in article
+    assert "<h2 style=" in article and "小标题</h2>" in article
     assert "<script>" not in article
     assert "<img" not in article
     assert "href=" not in article

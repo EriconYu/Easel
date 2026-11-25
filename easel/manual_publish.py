@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import html
 import json
-import re
 import uuid
 import zipfile
 from collections.abc import Mapping
@@ -18,6 +17,7 @@ PLATFORMS = {
     "zhihu": ("知乎", "https://zhuanlan.zhihu.com/write"),
     "juejin": ("掘金", "https://juejin.cn/editor/drafts/new?v=2"),
     "twitter-x": ("推特 X", "https://x.com/compose/post"),
+    "weibo": ("微博", "https://weibo.com/"),
     "toutiao": ("今日头条", "https://mp.toutiao.com/profile_v4/graphic/publish"),
     "bilibili": ("B站", "https://member.bilibili.com/"),
     "wechat-oa": ("公众号", "https://mp.weixin.qq.com/"),
@@ -33,7 +33,7 @@ def publishing_mode(settings: Mapping[str, str]) -> str:
 
 
 def build_package(outputs: Path, platform: str, title: str, body: str,
-                  tags: str, media: list[str], reviewed: bool) -> Path:
+                  tags: str, media: list[str], reviewed: bool, theme: str = '') -> Path:
     if platform not in PLATFORMS:
         raise ValueError("未知平台")
     if reviewed is not True:
@@ -78,12 +78,8 @@ def build_package(outputs: Path, platform: str, title: str, body: str,
             for index, path in enumerate(files, 1):
                 archive.write(path, f"media/{index:02d}_{path.name}", compress_type=zipfile.ZIP_STORED)
             if platform == "wechat-oa":
-                import markdown
-                paragraphs = markdown.markdown(html.escape(body), extensions=["sane_lists"])
-                # Raw HTML is escaped above; strip Markdown-generated links and remote images.
-                paragraphs = re.sub(r'<a\b[^>]*>', '<a>', paragraphs)
-                paragraphs = re.sub(r'<img\b[^>]*>', '', paragraphs)
-                paragraphs = paragraphs.replace('<p>', '<p style="margin:18px 0;line-height:1.9">')
+                from .wechat_layout import render_article
+                paragraphs = render_article(body, theme)
                 article = ('<!doctype html><html lang="zh-CN"><meta charset="utf-8">'
                            '<title>公众号排版预览</title><body><article style="max-width:680px;'
                            'margin:32px auto;padding:24px;font:16px/1.9 sans-serif;color:#222">'

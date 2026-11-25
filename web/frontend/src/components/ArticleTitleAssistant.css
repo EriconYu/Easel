@@ -1,0 +1,107 @@
+.article-title-trigger {
+  white-space: nowrap;
+}
+
+.article-title-field {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.article-title-field > .field {
+  width: auto;
+  min-width: min(12rem, 100%);
+  flex: 1;
+}
+
+.article-title-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  box-sizing: border-box;
+  margin: auto;
+  padding: 22px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: auto;
+}
+
+.article-title-dialog::backdrop {
+  background: rgb(0 0 0 / 48%);
+}
+
+.article-title-dialog h2,
+.article-title-dialog p {
+  margin: 0;
+}
+
+.article-title-dialog > header,
+.article-title-dialog > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.article-title-dialog header p,
+.article-title-current > span,
+.article-title-candidate small,
+.article-title-candidate strong + span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.article-title-current {
+  padding: 12px 0;
+  display: grid;
+  gap: 3px;
+}
+
+.article-title-candidates {
+  min-width: 0;
+  border: 0;
+  margin: 6px 0 14px;
+  padding: 0;
+}
+
+.article-title-candidates legend,
+.article-title-guidance {
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.article-title-candidate {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 12px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.article-title-candidate input {
+  margin: 4px 0 0;
+}
+
+.article-title-candidate > span,
+.article-title-guidance {
+  display: grid;
+  gap: 5px;
+  overflow-wrap: anywhere;
+}
+
+.article-title-dialog > footer,
+.article-title-dialog > p[role] {
+  margin-top: 12px;
+}
+
+.article-title-dialog > footer {
+  justify-content: flex-end;
+}
+
+.pv-title .article-title-trigger {
+  margin-inline-start: auto;
+}

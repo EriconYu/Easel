@@ -8,6 +8,8 @@ import type { WorkbenchBrief, WorkbenchSkill, WorkbenchDocument, WorkbenchVersio
 import type { Page } from './Sidebar';
 import type { TaskInspiration } from '../lib/api';
 import InspirationPicker from './InspirationPicker';
+import ArticleTitleAssistant from './ArticleTitleAssistant';
+import { splitArticleHeading, withoutRepeatedArticleHeading } from '../lib/article';
 import { draftKey, loadEditorDraft, writeDraft, confirmDraftReplacement, editorDirty, briefFields, inspirationFields, type EditorDraft } from '../lib/editorDrafts';
 
 export interface WorkbenchDiscussionProps {
@@ -16,10 +18,11 @@ export interface WorkbenchDiscussionProps {
   onAction: (format: WorkbenchFormat) => Promise<void>;
   onNavigate: (page: Page) => void;
   discussionLabel?: string;
+  onVersionSaved?: (version: WorkbenchVersion) => void;
 }
 const formats: WorkbenchFormat[] = ['母稿', '口播', '平台稿'];
 
-export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = '继续讨论' }: WorkbenchDiscussionProps) {
+export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = '继续讨论', onVersionSaved }: WorkbenchDiscussionProps) {
   const [brief, setBrief] = useState<WorkbenchBrief | null>(null);
   const [skills, setSkills] = useState<WorkbenchSkill[]>([]);
   const [documents, setDocuments] = useState<WorkbenchDocument[]>([]);
@@ -117,7 +120,9 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
     if (last.status !== 'done' || last.clean_end === false || last.stop_reason === 'error') throw new Error('本轮生成失败，不能作为稿件取回；请修正模型配置或重试。');
     if (!last.text?.trim()) throw new Error('最近对话没有可取回的稿件。');
     const body = last.text.match(/【正文开始】\s*([\s\S]*?)\s*【正文结束】/);
-    updateDraft({text: body ? body[1] : last.text, selectedVersion: '', sourceVersionId: '', sourceTurnId: last.turn_id || '', sourceKind: 'turn', savedText: '', savedName: ''});
+    const article = splitArticleHeading(body ? body[1] : last.text);
+    updateDraft({text: article.body, articleTitle: article.title, savedArticleTitle: '',
+      selectedVersion: '', sourceVersionId: '', sourceTurnId: last.turn_id || '', sourceKind: 'turn', savedText: '', savedName: ''});
     setNotice(body ? '已提取正文；内部依据仍保留在对话及引用快照中，请审核后另存版本。' : '未识别正文边界，已取回完整对话文本；请删除内部说明和路径后再用于发布。');
     });
   };
@@ -174,12 +179,19 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
         const selectedBrief = version.brief ?? version.declared_brief ?? brief;
         setBrief(selectedBrief);
         updateDraft({selectedVersion: version.id, text: version.text, name: version.name,
+          articleTitle: version.article_title, savedArticleTitle: version.article_title,
           sourceVersionId: version.id, sourceTurnId: '', sourceKind: version.provenance?.kind || 'version',
           brief: briefFields(selectedBrief), savedText: version.text, savedName: version.name});
       }}>
         <option value="">选择历史版本</option>
         {versions.map(version => <option key={version.id} value={version.id}>{version.name} · {version.created_at}</option>)}
       </select></label>
+      <div className="article-title-field">
+        <label>文章标题<input aria-label="文章标题" maxLength={120} value={draft.articleTitle ?? splitArticleHeading(text).title}
+          onChange={e => updateDraft({articleTitle: e.target.value})} /></label>
+        <ArticleTitleAssistant title={draft.articleTitle ?? splitArticleHeading(text).title} body={text} persona={persona}
+          disabled={busy} onApply={articleTitle => updateDraft({articleTitle})} />
+      </div>
       <label>稿件文本<textarea aria-label="稿件文本" className="workbench-manuscript" value={text} onChange={e => updateDraft({text: e.target.value})} placeholder="稿件保持空白，可取回对话稿或自行编辑" /></label>
       <label>版本名<input aria-label="版本名" value={name} onChange={e => updateDraft({name: e.target.value})} /></label>
       <p role="status">{editorDirty(draft) ? '工作草稿已保留，正文、版本名或创作依据尚未保存。' : '工作草稿已保留。'}{sourceVersionId ? '基于历史版本；手改内容需核验。' : sourceTurnId ? '基于对话快照；手改内容需核验。' : ''}</p>
@@ -190,18 +202,24 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
         <button onClick={retrieve}>取回最新对话稿</button>
         <button disabled={!name.trim() || !text.trim()} onClick={() => run(async () => {
           await save();
-          const saved = await saveWorkbenchVersion(persona, taskId, name.trim(), text, {
+          const articleTitle = (draft.articleTitle ?? splitArticleHeading(text).title).trim();
+          const articleBody = withoutRepeatedArticleHeading(text, articleTitle);
+          const saved = await saveWorkbenchVersion(persona, taskId, name.trim(), articleBody, {
             source_version_id: sourceVersionId || undefined, source_turn_id: sourceTurnId || undefined,
+            article_title: draft.articleTitle === undefined && !articleTitle ? undefined : articleTitle,
           });
-          updateDraft({name: name.trim(), savedText: text, savedName: name.trim(),
+          updateDraft({name: name.trim(), text: articleBody, savedText: articleBody, savedName: name.trim(),
+            articleTitle, savedArticleTitle: articleTitle,
             selectedVersion: saved?.id || '', sourceVersionId: saved?.id || sourceVersionId, sourceTurnId: '',
             sourceKind: saved?.provenance?.kind || draft.sourceKind});
-          setVersions((await fetchWorkbenchVersions(persona, taskId)).items);
+          if (saved?.id) {
+            setVersions(current => [...current, saved]);
+            onVersionSaved?.(saved);
+          }
           setNotice('已新增独立版本，原稿与历史版本均保留。');
         })}>保存新版本</button>
 
       </div>
-      <p className="workbench-muted">保存版本后，请在项目下方明确选择交付版本，再交给发布页审核；不会自动发布。</p>
     </fieldset>}
   </div>;
 }

@@ -21,11 +21,12 @@ export class ApiError extends Error {
 export interface WorkbenchSource { kind?:'trend'|'search'; provider?:string; platform:string; url:string; published_at:string|null; fetched_at:string|null; evidence:string }
 export interface WorkbenchCard { task_id:string; title:string; source_title?:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes?:number; analysis_evidence?:string; analysis_engine?:{runtime:string;model:string}|null; analyzed_at?:string; platforms:string[]; evergreen:boolean }
 export type WorkbenchFormat = '讨论'|'母稿'|'口播'|'平台稿';
-export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string }
+export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string; source?:'chat'; updated_at?:string }
 export interface WorkbenchResult { updated_at?:string; analyzed_at?:string; cards:WorkbenchCard[]; failures:string[]; pending_sources?:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
 export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[]; days:1|3|7; include_search:boolean }
 const wbPost = <T,>(path:string, body:unknown):Promise<T> => request(`/api/workbench/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[]}>{return request(`/api/workbench/${encodeURIComponent(persona)}`)}
+const workbenchScope = (persona: string) => encodeURIComponent(persona || '_general');
+export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[]}>{return request(`/api/workbench/${workbenchScope(persona)}`)}
 export interface WorkbenchEngines { search:{provider:string;providers:{id:string;label:string;configured:boolean}[];key_configured:boolean}; analysis:{runtime:string;model:string;label:string} }
 export function fetchWorkbenchEngines():Promise<WorkbenchEngines>{return request('/api/workbench/engines')}
 export function saveWorkbenchSearchSettings(body:{provider:string;api_key?:string;clear_key?:boolean}):Promise<WorkbenchEngines['search']>{return wbPost('search-settings',body)}
@@ -52,6 +53,7 @@ export interface WorkbenchSkill { id: string; title: string; description: string
 export interface WorkbenchDocument { id: string; title: string; type: string; source: string; available: boolean; reason?: string }
 export interface WorkbenchVersion {
   id: string; name: string; text: string; path: string; created_at: string;
+  article_title?: string;
   brief: WorkbenchBrief | null; evidence: WorkbenchEvidence[];
   provenance?: {kind: 'version' | 'turn' | 'unverified_turn' | 'manual_declared'; source_version_id?: string; source_turn_id?: string; context_id?: string; context_mode?: string};
   declared_brief?: WorkbenchBrief;
@@ -60,7 +62,7 @@ export function analyzeWorkbench(persona: string): Promise<WorkbenchResult> { re
 export function fetchWorkbenchSkills(): Promise<{items: WorkbenchSkill[]}> { return request('/api/workbench/catalog/skills'); }
 export function fetchWorkbenchDocuments(): Promise<{items: WorkbenchDocument[]}> { return request('/api/workbench/catalog/documents'); }
 export function fetchWorkbenchBrief(persona: string, taskId: string): Promise<WorkbenchBrief> {
-  return request(`/api/workbench/brief/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+  return request(`/api/workbench/brief/${workbenchScope(persona)}/${encodeURIComponent(taskId)}`);
 }
 export function saveWorkbenchBrief(persona: string, task_id: string, brief: WorkbenchBrief): Promise<WorkbenchBrief> {
   const {viewpoint, skill_ids, document_ids, strict_mode, allow_web, reference_title, reference_text} = brief;
@@ -69,11 +71,14 @@ export function saveWorkbenchBrief(persona: string, task_id: string, brief: Work
   }});
 }
 export function fetchWorkbenchVersions(persona: string, taskId: string): Promise<{items: WorkbenchVersion[]}> {
-  return request(`/api/workbench/versions/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+  return request(`/api/workbench/versions/${workbenchScope(persona)}/${encodeURIComponent(taskId)}`);
 }
 export function saveWorkbenchVersion(persona: string, task_id: string, name: string, text: string,
-  source: {source_version_id?: string; source_turn_id?: string} = {}): Promise<WorkbenchVersion> {
+  source: {source_version_id?: string; source_turn_id?: string; article_title?: string} = {}): Promise<WorkbenchVersion> {
   return wbPost('version', {persona, task_id, name, text, ...source});
+}
+export function saveChatVersion(input: {persona: string; session_id: string; reply_id: string; turn_id?: string; title: string; text: string; article_title?: string}): Promise<{task: WorkbenchTask; version: WorkbenchVersion}> {
+  return wbPost('chat-version', input);
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -370,6 +375,9 @@ export interface ScheduleItem {
   persona?: string;      // 关联工作台内容项目；旧自由日历不要求填写
   task_id?: string;
   version_id?: string;
+  draft_content?: { body: string; tags: string; media: string[]; persona: string; theme?: string };
+  publication_status?: string;
+  platform_draft_source?: string;
 }
 export type ScheduleInput = Omit<ScheduleItem, 'id'>;
 export interface ScheduleContext {
@@ -398,22 +406,30 @@ export function updateSchedule(id: string, item: ScheduleInput): Promise<Schedul
 export function canonicalPlatform(name: string = ''): string {
   return ({'微信公众号':'公众号','微信视频号':'视频号','推特 X':'X'} as Record<string,string>)[name] || name;
 }
-export async function savePublishSchedule(input: ScheduleInput): Promise<ScheduleItem> {
+export async function savePublishSchedule(input: ScheduleInput & {platform_draft_confirmed?: boolean}, scheduleId?: string): Promise<ScheduleItem> {
   const records = await fetchSchedule();
-  const linked = input.persona && input.task_id ? records.filter(item =>
+  const linked = input.task_id ? records.filter(item =>
     item.persona === input.persona && item.task_id === input.task_id &&
     (item.version_id || '') === (input.version_id || '') && canonicalPlatform(item.platform) === canonicalPlatform(input.platform)) : [];
-  let prior = linked.find(item => item.date === input.date && (item.time || '') === (input.time || ''));
+  let prior = scheduleId ? records.find(item => item.id === scheduleId && item.kind !== 'event'
+    && canonicalPlatform(item.platform) === canonicalPlatform(input.platform)
+    && (item.task_id || '') === (input.task_id || '') && (item.version_id || '') === (input.version_id || '')
+    && (item.draft_content?.persona ?? item.persona ?? '') === (input.draft_content?.persona ?? input.persona ?? item.draft_content?.persona ?? ''))
+    : linked.find(item => item.date === input.date && (item.time || '') === (input.time || ''));
+  if (scheduleId && !prior) throw new Error('原日历记录已变更，请重新打开稿件');
   if (!prior && input.status === 'published') {
     const pending = linked.filter(item => item.status !== 'published');
     if (pending.length > 1) throw new Error('此版本有多个待发布排期，请在内容日历中选择原记录回填');
     prior = pending[0];
   }
   if (prior?.status === 'published' && input.status !== 'published') throw new Error('原记录已发布，不能用存草稿覆盖');
-  const desired = {...prior, ...input};
+  const desired = {...prior, ...input, ...(scheduleId && prior ? {date: prior.date, time: prior.time, platform: prior.platform,
+    status: input.status === 'draft' && prior.status === 'scheduled' ? prior.status : input.status} : {})};
   const saved = prior ? await updateSchedule(prior.id, desired) : await createSchedule(desired);
   const actual = (await fetchSchedule()).find(item => item.id === saved.id);
-  if (!actual || ['title','status','url','note','persona','task_id','version_id','platform'].some(key =>
+  if (!actual || (input.platform_draft_confirmed && actual.publication_status !== 'draft')
+    || (input.draft_content && JSON.stringify(actual.draft_content) !== JSON.stringify(desired.draft_content))
+    || ['title','status','url','note','persona','task_id','version_id','platform'].some(key =>
     ((actual as unknown as Record<string,unknown>)[key] || '') !== ((desired as unknown as Record<string,unknown>)[key] || ''))) {
     throw new Error('排期保存后的读回不一致，未确认保存成功，请打开日历核对');
   }
@@ -448,7 +464,7 @@ export interface TaskInspiration {
   snapshots: {id: string; title: string; version_id?: string; version_name?: string}[];
 }
 export function fetchTaskInspiration(persona: string, taskId: string): Promise<TaskInspiration> {
-  return request(`/api/workbench/inspiration/${encodeURIComponent(persona)}/${encodeURIComponent(taskId)}`);
+  return request(`/api/workbench/inspiration/${workbenchScope(persona)}/${encodeURIComponent(taskId)}`);
 }
 export function saveTaskInspiration(persona: string, task_id: string, enabled: boolean, references: IdeaReference[]): Promise<TaskInspiration> {
   return wbPost('inspiration', {persona,task_id,enabled,references});
@@ -489,11 +505,12 @@ export function executeSkill(skill: string, input: string, persona?: string): Pr
 }
 
 /** 一次性 agent 任务（返回整段 markdown）——用于一稿多改 / 爆款拆解 / 发布预检等工具型调用。 */
-export function runAgent(message: string, persona?: string): Promise<{ response: string }> {
+export function runAgent(message: string, persona?: string, signal?: AbortSignal): Promise<{ response: string }> {
   return request('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, persona: persona || undefined }),
+    signal,
   });
 }
 
@@ -532,9 +549,36 @@ export function mediaUrl(path: string): string {
   return `${BASE}/api/media/${path.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-/** 删除内容库里的文件或整个项目目录（系统数据受保护，后端会拒）。 */
-export function deleteOutput(path: string): Promise<{ ok: boolean; deleted: string }> {
-  return request(`/api/output/${path.split('/').map(encodeURIComponent).join('/')}`, { method: 'DELETE' });
+export interface ContentDeletionPreview {
+  token: string;
+  assets: string[];
+  asset_count: number;
+  version_count: number;
+}
+export interface ContentDeletionResult {
+  retained_assets: boolean;
+}
+const encodedOutputPath = (path: string) => path.split('/').map(encodeURIComponent).join('/');
+const projectDeletionPath = (persona: string, taskId: string) =>
+  `/api/content-deletion/project/${workbenchScope(persona)}/${encodeURIComponent(taskId)}`;
+
+export function previewOutputDeletion(path: string): Promise<ContentDeletionPreview> {
+  return request(`/api/content-deletion/output/${encodedOutputPath(path)}`);
+}
+
+export function deleteOutput(path: string, token: string, deleteAssets: boolean): Promise<ContentDeletionResult> {
+  const params = new URLSearchParams({token, delete_assets: String(deleteAssets)});
+  return request(`/api/output/${encodedOutputPath(path)}?${params}`, {method: 'DELETE'});
+}
+
+export function previewProjectDeletion(persona: string, taskId: string): Promise<ContentDeletionPreview> {
+  return request(projectDeletionPath(persona, taskId));
+}
+
+export function deleteContentProject(persona: string, taskId: string, token: string, deleteAssets: boolean): Promise<ContentDeletionResult> {
+  return request(projectDeletionPath(persona, taskId), {
+    method: 'DELETE', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token, delete_assets: deleteAssets}),
+  });
 }
 
 export interface UploadedFile { id: string; name: string; path: string; }
@@ -708,6 +752,21 @@ export function fetchPublishingPolicy(): Promise<PublishingPolicy> {
   return request('/api/publishing-policy');
 }
 
+export function savePlatformDraft(platform: string, payload: {
+  title: string; body: string; tags: string; media: string[]; reviewed: boolean;
+  persona: string; task_id?: string; version_id?: string; schedule_id?: string; theme?: string;
+}): Promise<PublishResult> {
+  return request(`/api/platform-drafts/${encodeURIComponent(platform)}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+}
+
+export function formatWechatArticle(body: string, theme: string): Promise<{html: string}> {
+  return request('/api/format/wechat', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body, theme }),
+  });
+}
+
 /** Create a local export only; no social platform is contacted. */
 export function exportManualPackage(platform: string, payload: {
   title: string; body: string; tags: string; media: string[]; reviewed: boolean;
@@ -818,7 +877,7 @@ export function streamChat(
   persona: string | undefined,
   sessionId: string,
   onToken: (chunk: string) => void,
-  onDone: (sessionKey?: string) => void,
+  onDone: (sessionKey?: string, cleanEnd?: boolean) => void,
   onError: (err: Error) => void,
   onThinking?: (chunk: string) => void,
   onActivity?: (status: string) => void,
@@ -886,7 +945,9 @@ export function streamChat(
           onError(new Error(msg));
           return true;
         } else if (currentEvent === 'done') {
-          try { onDone((JSON.parse(data) as { sessionKey?: string }).sessionKey); } catch { onDone(); }
+          let result: {sessionKey?: string; cleanEnd?: boolean} = {};
+          try { result = JSON.parse(data) || {}; } catch { /* legacy stream */ }
+          onDone(result.sessionKey, result.cleanEnd);
           return true;
         }
         return false;

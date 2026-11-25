@@ -894,6 +894,49 @@ textarea.field { resize: vertical; min-height: 90px; }
 }
 .msg-action:hover { background: var(--surface-hover); color: var(--text); }
 .msg-action svg { flex-shrink: 0; }
+.msg-save {
+  align-self: flex-start;
+  padding: 5px 10px;
+  color: var(--text);
+  background: var(--surface-hover);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.msg-save:hover { border-color: var(--accent-start); }
+
+.chat-save-dialog {
+  width: min(640px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  padding: 24px;
+  margin: auto;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+.chat-save-dialog::backdrop { background: rgb(0 0 0 / 55%); }
+.chat-save-dialog form,
+.chat-save-dialog fieldset,
+.chat-save-dialog label { display: grid; gap: 10px; }
+.chat-save-dialog form { gap: 14px; }
+.chat-save-dialog h2,
+.chat-save-dialog p { margin: 0; }
+.chat-save-dialog p { color: var(--text-secondary); }
+.chat-save-dialog fieldset { border: 0; padding: 0; min-width: 0; }
+.chat-save-dialog input,
+.chat-save-dialog textarea {
+  width: 100%;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.chat-save-dialog textarea { min-height: 200px; resize: vertical; }
+.chat-save-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* 用户消息内联编辑 */
 .msg-edit { width: 74%; display: flex; flex-direction: column; gap: 8px; }
@@ -1149,6 +1192,9 @@ textarea.field { resize: vertical; min-height: 90px; }
 .publishing-mode-content { flex: 1; min-height: 0; overflow: hidden; }
 .publish-page { display: flex; height: 100%; overflow: hidden; }
 .publish-editor { width: 46%; min-width: 400px; max-width: 620px; overflow-y: auto; padding: 28px 28px 60px; border-right: 1px solid var(--border); }
+.publish-handoff { margin-bottom: 12px; }
+.publish-handoff p { margin: 8px 0; }
+.publish-handoff-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .publish-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
 .publish-previews { flex: 1; overflow-y: auto; padding: 28px 28px 60px; display: flex; flex-direction: column; gap: 14px; background: var(--surface-2); }
 .pv-card { padding: 0; overflow: hidden; }
@@ -1157,6 +1203,10 @@ textarea.field { resize: vertical; min-height: 90px; }
 .pv-count { font-size: 12px; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .pv-count.over { color: var(--red); font-weight: 700; }
 .pv-body { padding: 14px; }
+.wechat-article-preview { max-width: 408px; margin-top: 14px; padding: 18px 20px; background: #fff; color: #242424;
+  border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; overflow-x: auto; }
+.wechat-theme-picker { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 13px; }
+.wechat-theme-picker .field { width: auto; }
 .pv-title { font-size: 15px; font-weight: 650; margin-bottom: 8px; }
 .pv-title.over { color: var(--red); }
 .pv-text { font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; color: var(--text); word-break: break-word; }
@@ -1260,12 +1310,16 @@ textarea.field { resize: vertical; min-height: 90px; }
 .composer-attach-btn:hover:not(:disabled) { border-color: var(--accent-start); color: var(--text); background: var(--accent-soft); }
 .composer-attach-btn:disabled { opacity: 0.5; cursor: default; }
 
-/* 内容库卡片删除按钮（hover 显现） */
+/* 内容库卡片删除按钮 */
 .gcard-thumb { position: relative; }
 .gcard-del { position: absolute; top: 6px; right: 6px; z-index: 2; width: 26px; height: 26px;
-  display: none; align-items: center; justify-content: center; border-radius: 7px; border: none;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; border: none;
   background: rgba(0,0,0,0.55); color: #fff; cursor: pointer; transition: background var(--t-fast); }
-.gcard:hover .gcard-del { display: inline-flex; }
+@media (hover: hover) and (pointer: fine) {
+  .gcard-del { opacity: 0; }
+  .gcard:hover .gcard-del, .gcard:focus-within .gcard-del { opacity: 1; }
+}
+@media (pointer: coarse) { .gcard-del { width: 36px; height: 36px; } }
 .gcard-del:hover { background: var(--red); }
 
 /* 技能详情原名 */

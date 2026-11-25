@@ -141,7 +141,8 @@ def record_publish(platform: str, title: str, url: str = "", ptype: str = "",
                    profile: str = "", data_path: Path | None = None,
                    forward_log: bool = True, status: str = "published",
                    project_link: dict | None = None, receipt_id: str = "",
-                   autorecord: bool = True) -> bool:
+                   autorecord: bool = True, schedule_id: str = "",
+                   draft_content: dict | None = None) -> bool:
     """One receipt path for standalone publishers and web project handoffs.
 
     Explicit receipts are idempotent; draft receipts never enter attribution.
@@ -165,7 +166,14 @@ def record_publish(platform: str, title: str, url: str = "", ptype: str = "",
             if receipt_id and any(it.get('publication_receipt_id') == receipt_id or receipt_id in it.get('publication_receipts', []) for it in items):
                 return True
             matches = []
-            if project_link:
+            if schedule_id:
+                matches = [it for it in items if it.get('id') == schedule_id
+                           and it.get('kind') != 'event' and it.get('status') != 'published'
+                           and {'微信公众号':'公众号', '微信视频号':'视频号', '推特 X':'X'}.get(it.get('platform'), it.get('platform')) == platform_name
+                           and all((it.get(k) or '') == v for k, v in (project_link or {}).items())]
+                if not matches:
+                    return False
+            elif project_link:
                 matches = [it for it in items if all(it.get(k) == v for k, v in project_link.items())
                            and {'微信公众号':'公众号', '微信视频号':'视频号', '推特 X':'X'}.get(it.get('platform'), it.get('platform')) == platform_name
                            and it.get('status') != 'published']
@@ -193,6 +201,10 @@ def record_publish(platform: str, title: str, url: str = "", ptype: str = "",
             }
             if len(matches) != 1:
                 items.append(item)
+            if draft_content is not None and status == 'draft':
+                if schedule_id and (item.get('draft_content') or {}).get('persona', item.get('persona') or '') != draft_content['persona']:
+                    return False
+                item.update(title=title.strip(), draft_content=draft_content)
             item.update({
                 'status': 'scheduled' if status == 'draft' and item.get('status') == 'scheduled' else status,
                 'note': item.get('note', (note or '')[:200]), 'url': url or item.get('url', ''), 'profile': profile,
@@ -201,6 +213,8 @@ def record_publish(platform: str, title: str, url: str = "", ptype: str = "",
                 'publication_receipt_id': receipt_id,
                 'publication_receipts': list(dict.fromkeys([*item.get('publication_receipts', []), *([receipt_id] if receipt_id else [])])),
             })
+            if draft_content is not None and status == 'draft':
+                item['platform_draft_source'] = 'platform'
             # Serialize forwarding with receipt dedupe across web/CLI processes.
             if forward_log and status == 'published' and not already_forwarded:
                 _forward_publish_log(platform_name, item['title'], item['url'], ptype,

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
 import { test } from 'node:test';
+import { loadLibrary } from './publishHarness.mjs';
 
 const require = createRequire(new URL('../../web/frontend/package.json', import.meta.url));
 const ts = require('typescript');
@@ -16,7 +17,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 const automaticPolicy = { mode: 'automated', automaticSubmission: true };
 const manualPolicy = { mode: 'manual', automaticSubmission: false };
 
-function setup(responses = [automaticPolicy]) {
+function setup(responses = [automaticPolicy], draft = {}) {
   const state = [];
   const effects = [];
   let cursor = 0;
@@ -45,10 +46,17 @@ function setup(responses = [automaticPolicy]) {
     },
     'react/jsx-runtime': { jsx: createElement, jsxs: createElement },
     '../lib/api': {
+      fetchWorkbench: async () => ({tasks: [{task_id: 'project', title: '项目名'}]}),
+      fetchWorkbenchVersions: async () => ({items: [{id: 'version', text: '**文章名**\n\n正文。'}]}),
       fetchPublishingPolicy() {
         const response = responses[requests++];
         return response instanceof Error ? Promise.reject(response) : Promise.resolve(response);
       },
+    },
+    '../lib/article': loadLibrary('lib/article.ts'),
+    '../lib/store': {
+      loadPublishDraft: () => draft,
+      savePublishDraft: saved => { draft = saved; },
     },
     './PublishPage': { __esModule: true, default: 'automated-page' },
     './ManualPublishPage': { __esModule: true, default: 'manual-page' },
@@ -67,8 +75,21 @@ function setup(responses = [automaticPolicy]) {
       effects.forEach(effect => effect?.cleanup?.());
     },
     requests: () => requests,
+    draft: () => draft,
   };
 }
+
+test('回收旧项目草稿中的文章标题并保留平台改写', async () => {
+  const app = setup([manualPolicy], {
+    project_source: {task_id: 'project', version_id: 'version', persona: 'travel-brand'},
+    title: '项目名', body: '**文章名**\n\n正文。', overrides: {'wechat-oa': '**另一个段落**\n\n改写。'},
+  });
+  app.render();
+  await settle();
+  assert.equal(app.draft().title, '文章名');
+  assert.equal(app.draft().body, '正文。');
+  assert.equal(app.draft().overrides['wechat-oa'], '**另一个段落**\n\n改写。');
+});
 
 function nodes(tree) {
   if (Array.isArray(tree)) return tree.flatMap(nodes);

@@ -1,11 +1,60 @@
-export interface ProjectPublishDraft {task_id:string;persona:string;version_id:string;title:string;text:string}
-export default function ProjectPublishSource({draft,persona,busy=false,onImport}:{draft?:ProjectPublishDraft;persona:string;busy?:boolean;onImport:(draft:ProjectPublishDraft)=>void}) {
-  if (!draft) return null;
-  return <section className="card" aria-label="待载入的项目稿件" style={{padding:16,marginBottom:12}}>
-    <strong>来自内容项目：{draft.title}</strong>
-    <p>源稿版本：{draft.version_id}。载入仅替换发布编辑器中的文字，并清空旧的适配稿、标签和媒体选择；不会修改项目原稿或自动发布。</p>
-    <button disabled={busy || draft.persona!==persona} onClick={()=>{if (!busy && draft.persona===persona) onImport(draft);}}>载入此项目版本</button>
-    {busy && <p role="status">当前正在适配、检查或交付，请先停止生成或等待操作结束，再载入项目版本。</p>}
-    {draft.persona!==persona && <p role="alert">请先切换回此稿件所属画像。</p>}
+import { useCallback, useEffect, useRef } from 'react';
+
+export interface ProjectPublishDraft {
+  task_id: string;
+  persona: string;
+  version_id: string;
+  versionName: string;
+  title: string;
+  text: string;
+  platform: string;
+  scheduleId?: string;
+  tags?: string;
+  media?: string[];
+  theme?: string;
+}
+
+export interface ProjectPublishProps {
+  persona: string;
+  projectDraft?: ProjectPublishDraft;
+  onProjectDraftHandled?: (draft: ProjectPublishDraft) => void;
+}
+
+interface ProjectPublishSourceProps {
+  draft?: ProjectPublishDraft;
+  persona: string;
+  hasDraft: boolean;
+  busy: boolean;
+  onImport: (draft: ProjectPublishDraft) => void;
+  onHandled?: (draft: ProjectPublishDraft) => void;
+}
+
+export default function ProjectPublishSource({ draft, persona, hasDraft, busy, onImport, onHandled }: ProjectPublishSourceProps) {
+  const handled = useRef<ProjectPublishDraft | undefined>(undefined);
+  const pending = draft?.persona === persona ? draft : undefined;
+  const importDraft = useCallback(() => {
+    if (!pending || busy || handled.current === pending) return;
+    handled.current = pending;
+    onImport(pending);
+    onHandled?.(pending);
+  }, [busy, onHandled, onImport, pending]);
+
+  useEffect(() => {
+    if (!hasDraft) importDraft();
+  }, [hasDraft, importDraft]);
+
+  if (!pending || (!hasDraft && !busy)) return null;
+  return <section className="panel publish-handoff" aria-label="待载入的项目稿件">
+    <strong>{pending.title} · {pending.versionName}</strong>
+    {hasDraft && <p>发布页已有草稿。替换后将使用选定的稿件及其标签和素材。</p>}
+    {busy && <p role="status">请先停止生成或等待当前操作结束，再载入项目稿件。</p>}
+    <div className="publish-handoff-actions">
+      <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={importDraft}>
+        {hasDraft ? '替换现有草稿' : '载入项目稿件'}
+      </button>
+      {onHandled && <button type="button" className="btn btn-sm" onClick={() => onHandled(pending)}>
+        {hasDraft ? '保留当前草稿' : '取消载入'}
+      </button>}
+    </div>
   </section>;
 }

@@ -12,6 +12,7 @@ from easel.harnesses.base import HarnessError, RunRequest
 from easel.harnesses.workspace import harness_instructions, workspace_documents
 from easel.harnesses.rpc import close_sessions
 from easel.harnesses.codex import CodexAdapter
+from easel.harnesses import codex_state
 from easel.harnesses.acp import ACPAdapter
 
 
@@ -57,7 +58,9 @@ def test_external_request_root_uses_installed_shared_workspace(tmp_path):
 
 
 @pytest.mark.parametrize(("runtime", "adapter_type"), [("codex", CodexAdapter), ("acp", ACPAdapter)])
-def test_workspace_changes_reload_instructions_and_resume_original_session(tmp_path, runtime, adapter_type):
+def test_workspace_changes_reload_instructions_and_resume_original_session(tmp_path, runtime, adapter_type, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "desktop"))
+    monkeypatch.setattr(codex_state, "_state_home", lambda workspace: tmp_path / "easel-state")
     source = workspace_at(tmp_path)
     audit_file = tmp_path / "audit.jsonl"
     request = RunRequest("hello", tmp_path, {
