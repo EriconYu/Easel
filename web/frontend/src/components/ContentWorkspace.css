@@ -18,7 +18,7 @@
 .content-project-detail h3 { font-size: 15px; margin: 0 0 8px; }
 .content-project-header-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .content-library-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; color: var(--text-secondary); font-size: 13px; }
-.content-project-meta, .content-files-note { color: var(--text-tertiary); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.content-project-meta { color: var(--text-tertiary); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 .content-project-card {
   container: project-card / inline-size;
   margin-top: 18px;
@@ -206,7 +206,6 @@
 .content-project-source a { color: var(--accent-start); }
 .content-workspace button:focus-visible, .content-workspace input:focus-visible, .content-workspace textarea:focus-visible, .content-workspace select:focus-visible { outline: 2px solid var(--accent-start); outline-offset: 3px; }
 .content-workspace [role="tabpanel"][hidden] { display: none; }
-.content-workspace .gallery-page { padding: 0; }
 @media (max-width: 900px) {
   .content-workspace { padding: 20px 16px 36px; }
   .content-project-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }

@@ -58,6 +58,7 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
   const {persona, projectId, outputsJump, onJumpHandled, onOpenProject} = props;
   const jumpPath = outputsJump?.path ?? props.jumpPath;
   const [tab, setTab] = useState<'projects' | 'files'>('projects');
+  const [filesOpened, setFilesOpened] = useState(false);
   const [snapshot, setSnapshot] = useState<{persona: string; tasks: ProjectTask[]} | null>(null);
   const [selectedId, setSelectedId] = useState('');
   const [revision, setRevision] = useState(0);
@@ -70,6 +71,7 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
   // Clearing a consumed file jump must not force the project tab back open.
   useEffect(() => { setTab('projects'); }, [projectId, persona]);
   useEffect(() => { if (jumpPath) setTab('files'); }, [jumpPath, outputsJump?.token]);
+  useEffect(() => { if (tab === 'files') setFilesOpened(true); }, [tab]);
   useEffect(() => {
     const request = ++scope.current;
     setLoading(true);
@@ -137,9 +139,8 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
           : !error && <p className="content-project-empty">可以从对话保存稿件，也可以从灵感或热点开始创作。 <button className="btn btn-sm" onClick={() => props.onNavigate('chat')}>前往对话</button></p>}
       </div>}
     </div>
-    {tab === 'files' && <div role="tabpanel" id="content-files-panel" aria-labelledby="content-files-tab">
-      <p className="content-files-note">原文件浏览：保留全部产物、素材及文件路径；文件夹不是另一套创作项目。</p>
-      <OutputsPage jumpPath={retainedJump || jumpPath}
+    {(filesOpened || tab === 'files') && <div role="tabpanel" id="content-files-panel" aria-labelledby="content-files-tab" hidden={tab !== 'files'}>
+      <OutputsPage jumpPath={retainedJump || jumpPath} jumpToken={outputsJump?.token}
         onJumpHandled={retainedJump ? () => setRetainedJump('') : onJumpHandled} />
     </div>}
   </div>;

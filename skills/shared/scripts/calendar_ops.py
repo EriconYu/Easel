@@ -163,16 +163,23 @@ def record_publish(platform: str, title: str, url: str = "", ptype: str = "",
         platform_name = {'微信公众号':'公众号', '微信视频号':'视频号', '推特 X':'X'}.get(platform_name, platform_name)
         with calendar_store.lock(path):
             items = load(path)
-            if receipt_id and any(it.get('publication_receipt_id') == receipt_id or receipt_id in it.get('publication_receipts', []) for it in items):
+            recorded = next((it for it in items if receipt_id and
+                             (it.get('publication_receipt_id') == receipt_id or receipt_id in it.get('publication_receipts', []))), None)
+            syncing_draft = status == 'draft' and draft_content is not None
+            if recorded is not None and not syncing_draft:
                 return True
             matches = []
             if schedule_id:
                 matches = [it for it in items if it.get('id') == schedule_id
                            and it.get('kind') != 'event' and it.get('status') != 'published'
                            and {'微信公众号':'公众号', '微信视频号':'视频号', '推特 X':'X'}.get(it.get('platform'), it.get('platform')) == platform_name
-                           and all((it.get(k) or '') == v for k, v in (project_link or {}).items())]
+                           and all((it.get(k) or '') == ((project_link or {}).get(k) or '') for k in ('task_id', 'version_id', 'persona'))]
                 if not matches:
                     return False
+            elif recorded is not None and syncing_draft:
+                if recorded.get('status') == 'published' or recorded.get('kind') == 'event':
+                    return False
+                matches = [recorded]
             elif project_link:
                 matches = [it for it in items if all(it.get(k) == v for k, v in project_link.items())
                            and {'微信公众号':'公众号', '微信视频号':'视频号', '推特 X':'X'}.get(it.get('platform'), it.get('platform')) == platform_name
@@ -204,7 +211,12 @@ def record_publish(platform: str, title: str, url: str = "", ptype: str = "",
             if draft_content is not None and status == 'draft':
                 if schedule_id and (item.get('draft_content') or {}).get('persona', item.get('persona') or '') != draft_content['persona']:
                     return False
+                if (item.get('publication_receipt_id') == receipt_id and item.get('publication_status') == 'draft'
+                        and item.get('title') == title.strip() and item.get('draft_content') == draft_content):
+                    return True
                 item.update(title=title.strip(), draft_content=draft_content)
+            elif schedule_id and status == 'published':
+                item['title'] = title.strip() or item['title']
             item.update({
                 'status': 'scheduled' if status == 'draft' and item.get('status') == 'scheduled' else status,
                 'note': item.get('note', (note or '')[:200]), 'url': url or item.get('url', ''), 'profile': profile,

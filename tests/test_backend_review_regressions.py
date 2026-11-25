@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictBool
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'skills/shared/scripts'
@@ -32,7 +32,7 @@ def web_functions(*names, **values):
         node.decorator_list = []
     scope = dict(Path=Path, HTTPException=HTTPException, FileResponse=FileResponse, json=json, os=os, sys=sys, asyncio=asyncio,
                  shutil=shutil, threading=threading, time=time, uuid=uuid,
-                 BaseModel=BaseModel, SHARED_SCRIPTS=SCRIPTS, **values)
+                 BaseModel=BaseModel, Field=Field, StrictBool=StrictBool, SHARED_SCRIPTS=SCRIPTS, **values)
     future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
     exec(compile(ast.fix_missing_locations(ast.Module(body=[future, *nodes], type_ignores=[])), '<isolated-web>', 'exec'), scope)
     return scope
@@ -75,12 +75,15 @@ def test_calendar_publisher_preserves_corrupt_store(tmp_path, monkeypatch, bad):
 
 
 def schedule_web(path):
-    return web_functions('_schedule_lock', '_read_schedule', '_write_schedule',
-                         'ScheduleItem', 'api_schedule_create', 'api_schedule_update',
+    scope = web_functions('_schedule_lock', '_read_schedule', '_write_schedule', '_detach_schedule_project',
+                         'ScheduledDraftContent', 'ScheduleItem', '_annotate_manual_draft',
+                         'api_schedule_create', 'api_schedule_update',
                          SCHEDULE_FILE=path, OUTPUTS_DIR=path.parent,
                          _SCHEDULE_LOCK=threading.Lock(),
                          SCHEDULE_STATUSES={'idea', 'draft', 'scheduled', 'published'},
                          SCHEDULE_KINDS={'content', 'event'})
+    scope['ScheduleItem'].model_rebuild(_types_namespace=scope)
+    return scope
 
 
 def test_cli_and_web_hold_one_cross_process_transaction(tmp_path):
@@ -191,7 +194,7 @@ def test_version_api_accepts_explicit_source_and_forwards_it():
     scope = web_functions('WorkbenchVersionRequest', 'api_workbench_version', workbench=SimpleNamespace(save_version=lambda *a, **kw: calls.append((a,kw)) or {'id':'saved'}))
     req = scope['WorkbenchVersionRequest'](persona='fixture', task_id='task', name='draft', text='body', source_turn_id='turn')
     assert asyncio.run(scope['api_workbench_version'](req))['id'] == 'saved'
-    assert calls[0][1] == {'source_version_id':None,'source_turn_id':'turn'}
+    assert calls[0][1] == {'source_version_id': None, 'source_turn_id': 'turn', 'article_title': None}
 
 
 def test_delete_rejects_version_file_and_containing_directory(tmp_path, monkeypatch):

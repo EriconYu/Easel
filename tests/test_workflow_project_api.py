@@ -146,3 +146,73 @@ def test_reviewed_calendar_draft_updates_exact_row_without_publication(setup, mo
     assert saved['time'] == '10:00' and saved['status'] == 'scheduled'
     assert saved['publication_status'] == 'draft'
     assert saved['draft_content']['body'] == '新正文'
+
+
+def test_draft_retry_syncs_calendar_without_resubmitting(setup, monkeypatch):
+    from types import SimpleNamespace
+
+    client, data, _ = setup
+    plan = client.post('/api/schedule', json={**data, 'platform': '今日头条'}).json()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout='{"draft_saved":true}', stderr='')
+
+    monkeypatch.setattr(web.subprocess, 'run', run)
+    monkeypatch.setattr(web, '_publish_env', lambda: {})
+    monkeypatch.setattr(web, 'profile_exists', lambda name: name == '测试')
+    path = '/api/platform-drafts/toutiao'
+    payload = {**data, 'schedule_id': plan['id'], 'reviewed': True, 'body': '正文 A'}
+    with monkeypatch.context() as patch:
+        patch.setattr(web, '_record_successful_publish', lambda *args, **kwargs: False)
+        saved = client.post(path, json=payload).json()
+        assert saved['ok'] and saved['calendarRecorded'] is False
+
+    assert client.post(path, json=payload).json()['calendarRecorded'] is True
+    assert len(calls) == 1
+    assert client.post(path, json={**payload, 'body': '正文 B'}).json()['calendarRecorded'] is True
+    assert client.post(path, json=payload).json()['calendarRecorded'] is True
+    assert len(calls) == 2
+    items = client.get('/api/schedule').json()
+    assert len(items) == 1 and items[0]['id'] == plan['id']
+    assert items[0]['draft_content']['body'] == '正文 A'
+
+
+def test_standalone_draft_is_idempotent_and_video_is_rejected(setup, monkeypatch):
+    from types import SimpleNamespace
+
+    client, _, out = setup
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout='{"draft_saved":true}', stderr='')
+
+    monkeypatch.setattr(web.subprocess, 'run', run)
+    monkeypatch.setattr(web, '_publish_env', lambda: {})
+    path = '/api/platform-drafts/toutiao'
+    payload = {'title': '测试标题', 'body': '正文', 'reviewed': True}
+    (out / 'video.mp4').touch()
+    assert client.post(path, json={**payload, 'media': ['video.mp4']}).status_code == 400
+    assert calls == []
+    for _ in range(2):
+        assert client.post(path, json=payload).json()['calendarRecorded'] is True
+    assert len(calls) == len(client.get('/api/schedule').json()) == 1
+
+
+def test_automatic_publish_updates_selected_standalone_schedule(setup, monkeypatch):
+    from types import SimpleNamespace
+
+    client, _, _ = setup
+    plan = client.post('/api/schedule', json={'title': '原排期', 'platform': '今日头条', 'status': 'scheduled',
+                                              'date': '2030-05-12', 'time': '09:20'}).json()
+    monkeypatch.setattr(web, '_publish_env', lambda: {})
+    monkeypatch.setattr(web, '_require_automated_publishing', lambda: None)
+    monkeypatch.setattr(web.subprocess, 'run', lambda *args, **kwargs:
+                        SimpleNamespace(returncode=0, stdout='{"published":true}', stderr=''))
+    result = client.post('/api/publish/toutiao', json={'title': '发布标题', 'body': '正文', 'schedule_id': plan['id']})
+    assert result.json()['calendarRecorded'] is True
+    items = client.get('/api/schedule').json()
+    assert len(items) == 1 and items[0]['id'] == plan['id']
+    assert (items[0]['status'], items[0]['title'], items[0]['time']) == ('published', '发布标题', '09:20')

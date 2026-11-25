@@ -55,6 +55,7 @@ function PersonaManualPublishPage({ persona, projectDraft, onProjectDraftHandled
   const [saving, setSaving] = useState(false);
   const [sendingDraft, setSendingDraft] = useState('');
   const [savedPlatformDraft, setSavedPlatformDraft] = useState<Record<string, string>>({});
+  const [pendingCalendarSync, setPendingCalendarSync] = useState<Record<string, string>>({});
   const [wechatPreview, setWechatPreview] = useState<{ body: string; theme: string; html: string }>();
   const [previewError, setPreviewError] = useState(false);
   const ctl = useRef<AbortController | null>(null);
@@ -79,6 +80,7 @@ function PersonaManualPublishPage({ persona, projectDraft, onProjectDraftHandled
 
   const effective = (key: string) => overrides[key] ?? body;
   const effectiveTitle = (key: string) => platformTitles[key]?.trim() || title;
+  const toutiaoHasVideo = selectedMedia.some(path => /\.(mp4|mov|webm|mkv|avi|m4v|flv|ts)$/i.test(path));
   const frozen = createPublishSnapshot({ title, body, platforms, platformTitles, overrides, tags, project_source: projectSource, theme },
     persona, selectedMedia, false, PLATFORMS.filter(p => platforms.includes(p.key)));
   const wechatBody = effective('wechat-oa');
@@ -207,7 +209,7 @@ function PersonaManualPublishPage({ persona, projectDraft, onProjectDraftHandled
   };
 
   const sendDraft = async (key: string) => {
-    if (sendingDraft || !approved(key) || !platformCapability(key)?.directDraft) return;
+    if (sendingDraft || !approved(key) || !platformCapability(key)?.directDraft || (key === 'toutiao' && toutiaoHasVideo)) return;
     const payload = approvedPayloads.current[key];
     const version = snapshot(key);
     setSendingDraft(key);
@@ -215,7 +217,8 @@ function PersonaManualPublishPage({ persona, projectDraft, onProjectDraftHandled
       const result = await savePlatformDraft(key, {...payload, reviewed: true,
         schedule_id: schedule?.platform === key ? schedule.id : undefined});
       if (result.ok !== true) throw new Error(result.detail || result.message || '未确认草稿已保存');
-      setSavedPlatformDraft(previous => ({...previous, [key]: version}));
+      if (result.calendarRecorded !== false) setSavedPlatformDraft(previous => ({...previous, [key]: version}));
+      setPendingCalendarSync(previous => ({...previous, [key]: result.calendarRecorded === false ? version : ''}));
       showToast(result.message || '已保存到平台草稿箱');
     } catch (error) {
       showToast(error instanceof Error ? error.message : '未确认草稿已保存，请到平台后台核对');
@@ -347,8 +350,10 @@ function PersonaManualPublishPage({ persona, projectDraft, onProjectDraftHandled
         const isEdit = editing === p.key;
         const hasRecorded = recorded[p.key] === snapshot(p.key) + (links[p.key] || '');
         const draftSaved = savedPlatformDraft[p.key] === snapshot(p.key);
+        const syncPending = pendingCalendarSync[p.key] === snapshot(p.key);
+        const unsupportedVideo = p.key === 'toutiao' && toutiaoHasVideo;
         const canSaveDraft = ready && !!cleanTitle && !!text.trim()
-          && (p.key !== 'wechat-oa' || selectedMedia.some(path => /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(path)));
+          && !unsupportedVideo && (p.key !== 'wechat-oa' || selectedMedia.some(path => /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(path)));
         return <div key={p.key} className={`card pv-card pv-${p.key}`}>
           <div className="pv-head"><span className="pv-plat">{p.label}<span className={`pv-badge ${ready ? 'pv-badge-ok' : ''}`}>{ready ? '已人工审核' : '待人工审核'}</span></span><span className={`pv-count ${text.length > p.bodyLimit ? 'over' : ''}`}>{text.length} 字</span></div>
           <div className="pv-body">
@@ -370,6 +375,7 @@ function PersonaManualPublishPage({ persona, projectDraft, onProjectDraftHandled
             </label>}
             {p.key === 'wechat-oa' && previewError && <p role="status">排版预览暂不可用，可以导出 HTML 核对。</p>}
             <p className="pv-hint" style={{ marginTop: 12 }}>{p.hint} 字数和格式以官方页面为准。</p>
+            {unsupportedVideo && <p className="pv-hint" role="status">今日头条图文仅支持图片。保存到平台草稿箱前，请移除视频素材。</p>}
             <button className="pv-copy" onClick={() => setEditing(isEdit ? null : p.key)}><IconEdit size={13} />{isEdit ? '完成编辑' : '编辑此平台版本'}</button>
             <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, margin: '16px 0', fontSize: 13 }}>
               <input type="checkbox" aria-label={`${p.label}人工审核`} disabled={adapting || isEdit || !(cleanTitle || text.trim())} checked={ready} onChange={(e) => approve(p.key, e.target.checked)} />
@@ -381,7 +387,7 @@ function PersonaManualPublishPage({ persona, projectDraft, onProjectDraftHandled
               <button className="btn btn-sm" disabled={!ready || !!exporting} onClick={() => exportFor(p.key)}>{exporting === p.key ? '打包中…' : '导出稿件和素材 ZIP'}</button>
               {p.directDraft && <button type="button" className="btn btn-sm btn-primary"
                 disabled={!canSaveDraft || !!sendingDraft || saving || draftSaved} onClick={() => void sendDraft(p.key)}>
-                {draftSaved ? '已保存到草稿箱' : sendingDraft === p.key ? '保存中…' : '保存到平台草稿箱'}
+                {draftSaved ? '已保存到草稿箱' : sendingDraft === p.key ? '保存中…' : syncPending ? '重试同步日历' : '保存到平台草稿箱'}
               </button>}
               {ready ? <a className="btn btn-sm" href={p.url} target="_blank" rel="noopener noreferrer">
                 {p.draftEditor ? '打开官方编辑器 ↗' : '打开官方发布页 ↗'}

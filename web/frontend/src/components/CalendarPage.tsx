@@ -134,8 +134,7 @@ export default function CalendarPage({ onOpenProject, onOpenDraft }: Props) {
   const isEvent = form?.kind === 'event';
   const linkedForm = !isEvent && !!form?.task_id;
   const canOpenDraft = editing && editing.status !== 'published' && kindOf(editing) === 'content'
-    && platformCapability(editing.platform)?.manual
-    && (editing.draft_content?.body || (editing.status === 'draft' && editing.note) || editing.version_id);
+    && platformCapability(editing.platform)?.manual;
   const openProject = async () => {
     if (!linkedForm || !form?.task_id || !onOpenProject) return;
     setProjectError(''); setOpeningProject(true);

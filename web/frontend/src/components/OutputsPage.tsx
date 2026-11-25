@@ -1,350 +1,270 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import type { CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchOutputs, fetchOutputContent, mediaUrl } from '../lib/api';
-import type { ContentDeletionResult, OutputNode, OutputMeta } from '../lib/api';
+import type { ContentDeletionResult, FileKind, OutputNode } from '../lib/api';
 import ContentDeleteDialog from './ContentDeleteDialog';
 import { renderMarkdown } from '../lib/sanitize';
-import { IconOutputs, IconImage, IconVideo, IconMusic, IconFile, IconFolder, IconRefresh, IconChevron, IconTrash } from './icons';
+import { IconImage, IconVideo, IconMusic, IconFile, IconFolder, IconRefresh, IconChevron, IconTrash, IconSearch } from './icons';
+import './OutputsPage.css';
 
-const FILTERS: { key: string; label: string }[] = [
-  { key: 'all', label: '全部' },
-  { key: 'image', label: '图片' },
-  { key: 'video', label: '视频' },
-  { key: 'audio', label: '音频' },
-  { key: 'text', label: '文档' },
-];
+const fileLabels: Record<FileKind, string> = { image: '图片', video: '视频', audio: '音频', text: '文档', binary: '其他文件' };
+const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' });
+const displayName = (node: OutputNode) => node.label || node.meta?.title || (node.name === 'assets' && node.type === 'dir' ? '素材' : node.name);
+const isHtml = (name: string) => /\.html?$/i.test(name);
+const sortNodes = (a: OutputNode, b: OutputNode) => (b.mtime || 0) - (a.mtime || 0) || displayName(a).localeCompare(displayName(b), 'zh-CN');
 
-const KIND_LABEL: Record<string, string> = {
-  article: '文章', 'xhs-note': '小红书', video: '视频', cards: '卡片',
-  poster: '海报', audio: '音频', other: '其他',
-};
-const STATUS_LABEL: Record<string, string> = { draft: '草稿', ready: '待发', published: '已发' };
-const STATUS_COLOR: Record<string, string> = { draft: 'var(--text-tertiary)', ready: 'var(--amber)', published: 'var(--green)' };
-
-const badge: CSSProperties = {
-  fontSize: 11, padding: '1px 7px', borderRadius: 999,
-  background: 'var(--surface-hover)', color: 'var(--text-secondary)', whiteSpace: 'nowrap',
-};
-const statusBadge = (s: string): CSSProperties => ({
-  ...badge,
-  background: `color-mix(in srgb, ${STATUS_COLOR[s] || 'var(--text-tertiary)'} 13%, transparent)`,
-  color: STATUS_COLOR[s] || 'var(--text-secondary)',
-});
-
-function kindIcon(kind: string | undefined, size = 30) {
-  if (kind === 'video') return <IconVideo size={size} />;
-  if (kind === 'audio') return <IconMusic size={size} />;
-  if (kind === 'image') return <IconImage size={size} />;
+function itemIcon(node: OutputNode, size = 19) {
+  if (node.type === 'dir') return <IconFolder size={size} />;
+  if (node.kind === 'image') return <IconImage size={size} />;
+  if (node.kind === 'video') return <IconVideo size={size} />;
+  if (node.kind === 'audio') return <IconMusic size={size} />;
   return <IconFile size={size} />;
 }
-const isHtml = (name: string) => /\.html?$/i.test(name);
-const kindLabel = (f: OutputNode) =>
-  f.kind === 'text' ? (isHtml(f.name) ? '卡片' : '文档')
-    : f.kind === 'image' ? '图片' : f.kind === 'video' ? '视频' : f.kind === 'audio' ? '音频' : '文件';
 
-/** 递归找目录下第一张图/视频作封面缩略图。 */
-function firstMedia(node: OutputNode): OutputNode | null {
-  if (node.type === 'file') return (node.kind === 'image' || node.kind === 'video') ? node : null;
-  for (const c of node.children || []) {
-    const m = firstMedia(c);
-    if (m) return m;
+function fileSize(size?: number) {
+  if (size === undefined) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 ** 3) return `${(size / 1024 ** 2).toFixed(1)} MB`;
+  return `${(size / 1024 ** 3).toFixed(1)} GB`;
+}
+
+function flatten(nodes: OutputNode[]): OutputNode[] {
+  return nodes.flatMap(node => [node, ...flatten(node.children || [])]);
+}
+
+function resolveFolder(roots: OutputNode[], path: string) {
+  const trail: OutputNode[] = [];
+  let entries = roots;
+  for (const part of path.split('/').filter(Boolean)) {
+    const folder = entries.find(node => node.type === 'dir' && node.name === part);
+    if (!folder) break;
+    trail.push(folder);
+    entries = folder.children || [];
   }
-  return null;
-}
-
-/** 展示头声明的封面 → 伪 file 节点（供 Thumb 渲染）。 */
-function coverNode(m?: OutputMeta): OutputNode | null {
-  if (!m?.cover) return null;
-  const kind = /\.(mp4|mov|webm|mkv)$/i.test(m.cover) ? 'video' : 'image';
-  return { name: 'cover', type: 'file', path: m.cover, kind } as OutputNode;
-}
-
-/** 按名称路径解析到当前目录的 children（stackNames 稳定，刷新后仍有效）。 */
-function resolvePath(roots: OutputNode[], names: string[]): OutputNode[] {
-  let nodes = roots;
-  for (const nm of names) {
-    const found = nodes.find((n) => n.type === 'dir' && n.name === nm);
-    if (!found) return nodes;   // 路径失效（被删/改）→ 停在能解析到的层
-    nodes = found.children || [];
-  }
-  return nodes;
-}
-
-function Thumb({ f, big }: { f: OutputNode | null; big?: boolean }) {
-  if (f && f.kind === 'image') return <img src={mediaUrl(f.path)} alt="" loading="lazy" />;
-  if (f && f.kind === 'video') return <video src={mediaUrl(f.path)} preload="metadata" muted />;
-  return <div className="gcard-ph">{kindIcon(f?.kind, big ? 34 : 30)}</div>;
+  return { trail, entries };
 }
 
 interface OutputsPageProps {
-  /** 从对话跳转进来的目录（outputs 相对路径，不含 outputs/ 前缀）；消费后由父层清空 */
   jumpPath?: string;
+  jumpToken?: number;
   onJumpHandled?: () => void;
 }
 
-export default function OutputsPage({ jumpPath, onJumpHandled }: OutputsPageProps) {
+export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: OutputsPageProps) {
   const [roots, setRoots] = useState<OutputNode[]>([]);
-  const [treeError, setTreeError] = useState('');
-  const [stack, setStack] = useState<string[]>([]);   // 当前所在的文件夹名称路径
-  const [filter, setFilter] = useState('all');
+  const [loading, setLoading] = useState(true);
+  const [treeReady, setTreeReady] = useState(false);
+  const [error, setError] = useState('');
+  const [folderPath, setFolderPath] = useState('');
+  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState<FileKind | 'all'>('all');
+  const [view, setView] = useState<'list' | 'grid'>('list');
   const [selected, setSelected] = useState<OutputNode | null>(null);
   const [deleting, setDeleting] = useState<OutputNode | null>(null);
-  const [deletionNotice, setDeletionNotice] = useState('');
-  const [content, setContent] = useState('');
-  const [loading, setLoading] = useState(false);
-  const reqSeq = useRef(0);
+  const [notice, setNotice] = useState('');
+  const treeRequest = useRef(0);
+  const { trail, entries } = useMemo(() => resolveFolder(roots, folderPath), [roots, folderPath]);
+  const scope = trail.at(-1);
+  const tree = useMemo(() => flatten(roots), [roots]);
+  const treeByPath = useMemo(() => new Map(tree.map(item => [item.path, item])), [tree]);
+  const allInFolder = useMemo(() => scope ? flatten(entries) : tree, [scope, entries, tree]);
+  const term = query.trim().toLocaleLowerCase();
+  const searching = !!term || filter !== 'all';
+  const matches = searching ? allInFolder.filter(node =>
+    (filter === 'all' || (node.type === 'file' && node.kind === filter)) &&
+    (!term || [displayName(node), node.name, node.path, node.meta?.platform].some(value => value?.toLocaleLowerCase().includes(term))),
+  ) : entries;
+  const folders = matches.filter(item => item.type === 'dir').sort(sortNodes);
+  const files = matches.filter(item => item.type === 'file').sort(sortNodes);
+  const deliverablePaths = new Set(trail[0]?.meta?.deliverablePaths);
+  const deliverables = !searching && trail.length === 1 ? files.filter(item => deliverablePaths.has(item.path)) : [];
+  const deliverableSet = new Set(deliverables.map(item => item.path));
 
-  const load = useCallback(() => {
-    setTreeError('');
-    fetchOutputs().then(setRoots).catch(() => setTreeError('加载产物列表失败'));
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  const currentNodes = useMemo(() => resolvePath(roots, stack), [roots, stack]);
-  const dirs = useMemo(
-    () => currentNodes.filter((n) => n.type === 'dir').sort((a, b) => (b.mtime || 0) - (a.mtime || 0)),
-    [currentNodes]);
-  const files = useMemo(() => {
-    const fs = currentNodes.filter((n) => n.type === 'file').sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
-    return filter === 'all' ? fs : fs.filter((f) => f.kind === filter);
-  }, [currentNodes, filter]);
-
-  const atTop = stack.length === 0;
-  const atProjectRoot = stack.length === 1;
-  // 当前项目的展示头（进入项目后才有），用于「成品/素材」分区
-  const projectMeta = useMemo(
-    () => (stack.length >= 1 ? roots.find((r) => r.name === stack[0])?.meta : undefined),
-    [roots, stack]);
-  const deliverableSet = useMemo(
-    () => new Set(atProjectRoot ? (projectMeta?.deliverablePaths || []) : []),
-    [projectMeta, atProjectRoot]);
-  const hasSplit = atProjectRoot && deliverableSet.size > 0;
-  const deliverableFiles = useMemo(
-    () => (hasSplit ? files.filter((f) => deliverableSet.has(f.path)) : []),
-    [files, deliverableSet, hasSplit]);
-  const restFiles = useMemo(
-    () => (hasSplit ? files.filter((f) => !deliverableSet.has(f.path)) : files),
-    [files, deliverableSet, hasSplit]);
-
-  const enterDir = useCallback((name: string) => { setStack((s) => [...s, name]); setFilter('all'); }, []);
-  const goTo = useCallback((depth: number) => { setStack((s) => s.slice(0, depth)); setFilter('all'); }, []);
-
-  const remove = (node: OutputNode, e: React.MouseEvent) => {
-    e.stopPropagation();
-    setDeletionNotice('');
-    setDeleting(node);
-  };
-  const deletionPath = deleting?.path || '';
-  const finishRemoval = (result: ContentDeletionResult) => {
-    setSelected(current => current?.path === deletionPath ? null : current);
-    setDeleting(null);
-    setDeletionNotice(result.retained_assets ? '成品已删除，关联素材已保留。' : '已删除。');
-    load();
-  };
-
-  const open = useCallback(async (f: OutputNode) => {
-    const seq = ++reqSeq.current;
-    setSelected(f); setContent('');
-    if (f.kind === 'text' && !isHtml(f.name)) {
-      setLoading(true);
-      try {
-        const res = await fetchOutputContent(f.path);
-        if (seq === reqSeq.current) setContent(res.isBinary ? '' : res.content);
-      } finally { if (seq === reqSeq.current) setLoading(false); }
+  const load = useCallback(async () => {
+    const request = ++treeRequest.current;
+    setLoading(true);
+    setError('');
+    try {
+      const result = await fetchOutputs();
+      if (treeRequest.current === request) {
+        setRoots(result);
+        setTreeReady(true);
+        setFolderPath(path => resolveFolder(result, path).trail.at(-1)?.path || '');
+      }
+    } catch {
+      if (treeRequest.current === request) setError('读取文件与素材失败，请重试。');
+    } finally {
+      if (treeRequest.current === request) setLoading(false);
     }
   }, []);
-
-  // 等内容树加载后区分文件与目录；文件链接直接打开预览。
   useEffect(() => {
-    if (!jumpPath || roots.length === 0) return;
-    const parts = jumpPath.split('/').filter(Boolean);
-    const parent: string[] = [];
-    let nodes = roots;
-    let node: OutputNode | undefined;
-    for (const part of parts) {
-      node = nodes.find(candidate => candidate.name === part);
-      if (!node || node.type !== 'dir') break;
-      parent.push(part);
-      nodes = node.children || [];
-    }
-    if (node?.path !== parts.join('/')) node = undefined;
-    setStack(parent);
+    void load();
+    const request = treeRequest;
+    return () => { ++request.current; };
+  }, [load]);
+
+  const navigate = (path: string) => {
+    setFolderPath(path);
     setFilter('all');
-    if (node?.type === 'file') void open(node);
-    else setSelected(null);
-    onJumpHandled?.();
-  }, [jumpPath, roots, open, onJumpHandled]);
-
-  const preview = () => {
-    if (!selected) return null;
-    const url = mediaUrl(selected.path);
-    if (selected.kind === 'image') return <img src={url} alt={selected.name} style={{ maxWidth: '100%', borderRadius: 'var(--radius)' }} />;
-    if (selected.kind === 'video') return <video src={url} controls style={{ maxWidth: '100%', borderRadius: 'var(--radius)' }} />;
-    if (selected.kind === 'audio') return <audio src={url} controls style={{ width: '100%' }} />;
-    if (selected.kind === 'text' && isHtml(selected.name)) return (
-      <>
-        {/* allow-scripts：让预览页自带的「复制到公众号」按钮(execCommand('copy'))能运行；
-            allow="clipboard-write"：授予剪贴板写权限。不给 allow-same-origin —— iframe 保持
-            opaque origin，脚本跑得起来但访问不到本站，安全。(修复：内嵌预览里复制按钮点了没反应) */}
-        <iframe src={`${url}?v=${selected.mtime ?? 0}`} title={selected.name} sandbox="allow-scripts" allow="clipboard-write"
-          style={{ width: '100%', height: '68vh', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: '#fff' }} />
-        <div style={{ marginTop: 8 }}><a href={url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-start)', fontSize: 13 }}>在新标签打开 ↗</a></div>
-      </>
-    );
-    if (selected.kind === 'text') {
-      if (loading) return <div className="loading"><div className="spinner" />加载中…</div>;
-      return <div className="outputs-viewer-content" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />;
+    setQuery('');
+    setNotice('');
+  };
+  const jumpHandled = useRef(onJumpHandled);
+  jumpHandled.current = onJumpHandled;
+  useEffect(() => {
+    if (!jumpPath || !treeReady) return;
+    const node = treeByPath.get(jumpPath);
+    if (!node) {
+      setNotice('找不到这个文件或文件夹，可能已被移动或删除。');
+    } else {
+      const parent = node.path.slice(0, Math.max(0, node.path.lastIndexOf('/')));
+      setFolderPath(node.type === 'dir' ? node.path : parent);
+      setQuery('');
+      setFilter('all');
+      setNotice('');
+      setSelected(node.type === 'file' ? node : null);
     }
-    return <div style={{ color: 'var(--text-secondary)', fontSize: 14 }}>无法预览。<a href={url} download style={{ color: 'var(--accent-start)' }}>下载 {selected.name}</a></div>;
+    jumpHandled.current?.();
+  }, [jumpPath, jumpToken, treeReady, treeByPath]);
+
+  const finishRemoval = (result: ContentDeletionResult) => {
+    if (selected?.path === deleting?.path) setSelected(null);
+    setDeleting(null);
+    setNotice(result.retained_assets ? '成品已删除，素材已保留。' : '已删除。');
+    void load();
   };
 
-  /** 项目/文件夹卡片：顶层项目用展示头（标题/平台/状态/封面），嵌套子文件夹回退朴素样式。 */
-  const renderDir = (d: OutputNode) => {
-    const m = d.meta;
-    const cover = coverNode(m) || firstMedia(d);
-    return (
-      <div key={d.path} className="card card-hover gcard" onClick={() => enterDir(d.name)}>
-        <div className="gcard-thumb">
-          <span className="gcard-kind">{m?.kind ? (KIND_LABEL[m.kind] || m.kind) : '文件夹'}</span>
-          <button className="gcard-del" title="删除文件夹" aria-label={`删除文件夹 ${m?.title || d.name}`}
-            onClick={(e) => remove(d, e)}><IconTrash size={14} /></button>
-          {cover ? <Thumb f={cover} big /> : <div className="gcard-ph"><IconFolder size={38} /></div>}
-        </div>
-        <div className="gcard-meta">
-          <div className="gcard-name" title={m?.title || d.name}>
-            {!m && <IconFolder size={13} />} {m?.title || d.name}
-          </div>
-          <div className="gcard-sub" style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-            {m?.platform && <span style={badge}>{m.platform}</span>}
-            {m?.status && <span style={statusBadge(m.status)}>{STATUS_LABEL[m.status] || m.status}</span>}
-            <span>{d.fileCount ?? 0} 个文件</span>
-          </div>
-        </div>
-      </div>
-    );
+  const readablePath = (path: string) => {
+    const top = path.split('/')[0];
+    const node = treeByPath.get(top);
+    return node ? displayName(node) + path.slice(top.length) : path;
   };
 
-  const renderFile = (f: OutputNode) => (
-    <div key={f.path} className="card card-hover gcard" onClick={() => open(f)}>
-      <div className="gcard-thumb">
-        <span className="gcard-kind">{kindLabel(f)}</span>
-        <button className="gcard-del" title="删除文件" aria-label={`删除文件 ${f.name}`} onClick={(e) => remove(f, e)}><IconTrash size={14} /></button>
-        <Thumb f={f} />
-      </div>
-      <div className="gcard-meta">
-        <div className="gcard-name" title={f.name}>{f.name}</div>
+  const renderEntry = (node: OutputNode) => {
+    const folder = node.type === 'dir';
+    const label = displayName(node);
+    const type = folder ? `${node.fileCount ?? 0} 个文件` : fileLabels[node.kind || 'binary'];
+    const parentPath = node.path.slice(0, Math.max(0, node.path.lastIndexOf('/')));
+    const place = searching && parentPath && parentPath !== folderPath ? readablePath(parentPath) : '';
+    const cover = view === 'grid' && (node.kind === 'image' ? node.path : node.meta?.cover);
+    const imageCover = cover && /\.(avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(cover);
+    return <li className="file-browser-entry" key={node.path}>
+      <button type="button" className="file-browser-entry-main" onClick={() => folder ? navigate(node.path) : setSelected(node)}>
+        <span className={`file-browser-icon ${folder ? 'is-folder' : ''}`}>
+          {imageCover ? <img src={mediaUrl(cover)} alt="" loading="lazy" /> : itemIcon(node, view === 'grid' ? 35 : 19)}
+        </span>
+        <span className="file-browser-name">
+          <strong>{label}</strong>
+          {place && <span className="file-browser-location">{place}</span>}
+          {folder && node.meta?.platform && <span className="file-browser-location">{node.meta.platform}</span>}
+        </span>
+        <span className="file-browser-detail">{type}{!folder && node.size !== undefined ? ` · ${fileSize(node.size)}` : ''}</span>
+        <span className="file-browser-date">{node.mtime ? dateFormat.format(node.mtime * 1000) : ''}</span>
+        <span className="file-browser-enter">{folder && <IconChevron size={15} />}</span>
+      </button>
+      <button type="button" className="file-browser-delete icon-btn" title={folder ? '删除文件夹' : '删除文件'}
+        aria-label={`删除${folder ? '文件夹' : '文件'} ${label}`} onClick={() => setDeleting(node)}><IconTrash size={16} /></button>
+    </li>;
+  };
+
+  const section = (label: string, nodes: OutputNode[]) => nodes.length > 0 && <section className="file-browser-section">
+    <h2>{label} <span>{nodes.length}</span></h2>
+    <ul className={`file-browser-entries is-${view}`}>{nodes.map(renderEntry)}</ul>
+  </section>;
+
+  return <div className="file-browser">
+    <div className="file-browser-toolbar">
+      <nav className="file-browser-path" aria-label="文件路径">
+        {!!scope && <button type="button" className="icon-btn file-browser-up" aria-label="返回上一级"
+          onClick={() => navigate(trail.at(-2)?.path || '')}><IconChevron size={16} /></button>}
+        <button type="button" className="file-browser-crumb" aria-current={scope ? undefined : 'location'} onClick={() => navigate('')}>全部文件</button>
+        {trail.map(node => <span key={node.path} className="file-browser-crumb-node"><IconChevron size={13} />
+          {node === scope ? <span aria-current="location">{displayName(node)}</span>
+            : <button type="button" className="file-browser-crumb" onClick={() => navigate(node.path)}>{displayName(node)}</button>}
+        </span>)}
+      </nav>
+      <div className="file-browser-tools">
+        <label className="file-browser-search">
+          <IconSearch size={17} />
+          <input type="search" aria-label="搜索文件与素材" placeholder={scope ? '搜索此文件夹' : '搜索文件名或项目名'} value={query} onChange={event => setQuery(event.target.value)} />
+        </label>
+        <label className="file-browser-filter">
+          <select aria-label="文件类型" value={filter} onChange={event => setFilter(event.target.value as typeof filter)}>
+            <option value="all">所有类型</option>
+            {Object.entries(fileLabels).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}
+          </select>
+        </label>
+        <div className="file-browser-views" role="group" aria-label="文件视图">
+          <button type="button" aria-pressed={view === 'list'} onClick={() => setView('list')}>列表</button>
+          <button type="button" aria-pressed={view === 'grid'} onClick={() => setView('grid')}>缩略图</button>
+        </div>
+        <button type="button" className="icon-btn file-browser-refresh" aria-label="刷新文件" title="刷新文件" disabled={loading} onClick={() => void load()}><IconRefresh size={16} /></button>
       </div>
     </div>
-  );
+    {notice && <p className="content-library-notice" role="status">{notice}</p>}
+    {error && <p className="workbench-error" role="alert">{error}</p>}
+    {!treeReady && loading ? <p className="file-browser-empty" role="status">正在读取文件…</p>
+      : !error && !folders.length && !files.length ? <div className="file-browser-empty">
+        <IconFolder size={27} />
+        <p>{searching ? '没有符合条件的文件' : scope ? '这个文件夹是空的' : '文件与素材会显示在这里'}</p>
+        {searching && <button type="button" className="btn btn-sm" onClick={() => { setQuery(''); setFilter('all'); }}>清除筛选</button>}
+      </div> : <>
+        {section('成品', deliverables)}
+        {section('文件夹', folders)}
+        {section(searching ? '匹配的文件' : '文件', files.filter(node => !deliverableSet.has(node.path)))}
+      </>}
+    {selected && <FilePreview key={selected.path} file={selected} displayPath={readablePath(selected.path)}
+      onClose={() => setSelected(null)} />}
+    {deleting && <ContentDeleteDialog name={displayName(deleting)} kind={deleting.type === 'dir' ? '文件夹' : '文件'}
+      path={deleting.path} onDeleted={finishRemoval} onClose={() => setDeleting(null)} />}
+  </div>;
+}
 
-  const empty = dirs.length === 0 && files.length === 0;
+function FilePreview({ file, displayPath, onClose }: { file: OutputNode; displayPath: string; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const html = file.kind === 'text' && isHtml(file.name);
+  const text = file.kind === 'text' && !html;
+  const [content, setContent] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(text);
+  const url = mediaUrl(file.path);
+  const mediaError = () => setError('预览加载失败。可以下载文件后打开。');
 
-  return (
-    <div className="gallery-page">
-      <div className="gallery-head">
-        <div>
-          <h1 className="page-title">内容库</h1>
-          {stack.length > 0 && <nav className="gallery-breadcrumb" aria-label="内容库路径">
-            <button className="crumb" onClick={() => goTo(0)}>内容库</button>
-            {stack.map((name, i) => {
-              const label = i === 0 ? projectMeta?.title || name : name;
-              return (
-                <span key={i}>
-                  <span className="crumb-sep">/</span>
-                  {i === stack.length - 1
-                    ? label
-                    : <button className="crumb" onClick={() => goTo(i + 1)}>{label}</button>}
-                </span>
-              );
-            })}
-          </nav>}
-          <p className="page-subtitle">
-            {atTop
-              ? `按项目归档，共 ${roots.length} 个项目。点项目进去看成品与素材。`
-              : `${dirs.length} 个文件夹 · ${files.length} 个文件（可继续点开子文件夹）`}
-          </p>
+  useEffect(() => { dialog.current?.showModal(); }, []);
+  useEffect(() => {
+    if (!text) return;
+    let active = true;
+    fetchOutputContent(file.path).then(result => {
+      if (!active) return;
+      if (result.isBinary) setError('此文件需要下载后查看。');
+      else setContent(result.content);
+    }).catch(() => { if (active) setError('读取文件失败。可以下载文件后打开。'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [file.path, text]);
+
+  return <dialog className="file-preview" ref={dialog} aria-labelledby="file-preview-title"
+    onCancel={event => { event.preventDefault(); onClose(); }}
+    onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="file-preview-panel">
+      <header className="file-preview-header">
+        <div><h2 id="file-preview-title">{displayName(file)}</h2><p title={displayPath}>{displayPath}</p></div>
+        <div className="file-preview-actions">
+          {html && <a className="btn btn-sm" href={url} target="_blank" rel="noreferrer">新标签打开 ↗</a>}
+          <a className="btn btn-sm" href={url} download={file.name}>下载</a>
+          <button type="button" className="icon-btn" aria-label="关闭预览" autoFocus onClick={onClose}>×</button>
         </div>
-        <button className="btn btn-sm" onClick={load}><IconRefresh size={14} /> 刷新</button>
+      </header>
+      <div className={`file-preview-body is-${file.kind || 'binary'}`}>
+        {error ? <p className="file-browser-empty" role="alert">{error}</p>
+          : loading ? <p role="status">正在读取文件…</p>
+          : file.kind === 'image' ? <img src={url} alt={file.name} onError={mediaError} />
+          : file.kind === 'video' ? <video src={url} controls onError={mediaError} />
+          : file.kind === 'audio' ? <audio src={url} controls onError={mediaError} />
+          : html ? <iframe src={`${url}?v=${file.mtime ?? 0}`} title={file.name} sandbox="allow-scripts" allow="clipboard-write" />
+          : text ? <div className="outputs-viewer-content" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+          : <p>下载后查看此文件。</p>}
       </div>
-
-      {treeError && <div className="notice-error">{treeError}</div>}
-
-      {/* 项目主题标签（进入项目根时展示） */}
-      {atProjectRoot && projectMeta?.tags && projectMeta.tags.length > 0 && (
-        <div className="gallery-filters" style={{ marginBottom: 4 }}>
-          {projectMeta.tags.map((t) => <span key={t} style={badge}>#{t}</span>)}
-        </div>
-      )}
-
-      {/* 面包屑返回 + 文件过滤（进入任意层后显示） */}
-      {stack.length > 0 && (
-        <div className="gallery-filters">
-          <button className="btn btn-sm" onClick={() => goTo(stack.length - 1)}>
-            <span style={{ transform: 'rotate(180deg)', display: 'inline-flex' }}><IconChevron size={13} /></span> 返回上级
-          </button>
-          {files.length > 0 && FILTERS.map((f) => (
-            <button key={f.key} className={`chip ${filter === f.key ? 'active' : ''}`} onClick={() => setFilter(f.key)}>{f.label}</button>
-          ))}
-        </div>
-      )}
-
-      {empty && !treeError ? (
-        <div className="empty-state" style={{ height: 300 }}>
-          <div className="empty-icon"><IconOutputs size={44} /></div>
-          <p>{atTop ? '还没有产物——去对话或技能库生成第一条内容吧' : '这个文件夹是空的'}</p>
-        </div>
-      ) : hasSplit ? (
-        <>
-          {/* 成品区 */}
-          {deliverableFiles.length > 0 && (
-            <>
-              <div className="section-label" style={{ margin: '6px 0 8px', fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
-                成品 · {deliverableFiles.length}
-              </div>
-              <div className="gallery-grid">{deliverableFiles.map(renderFile)}</div>
-            </>
-          )}
-          {/* 素材 / 过程文件区 */}
-          {(dirs.length > 0 || restFiles.length > 0) && (
-            <>
-              <div className="section-label" style={{ margin: '18px 0 8px', fontSize: 13, fontWeight: 600, color: 'var(--text-tertiary)' }}>
-                素材 / 过程文件
-              </div>
-              <div className="gallery-grid">
-                {dirs.map(renderDir)}
-                {restFiles.map(renderFile)}
-              </div>
-            </>
-          )}
-        </>
-      ) : (
-        <div className="gallery-grid">
-          {dirs.map(renderDir)}
-          {files.map(renderFile)}
-        </div>
-      )}
-
-      {deletionNotice && <p className="content-library-notice" role="status">{deletionNotice}</p>}
-      {deleting && <ContentDeleteDialog name={deleting.meta?.title || deleting.name}
-        kind={deleting.type === 'dir' ? '文件夹' : '文件'} path={deletionPath}
-        onDeleted={finishRemoval} onClose={() => setDeleting(null)} />}
-      {selected && (
-        <div className="drawer-overlay" onClick={() => setSelected(null)}>
-          <div className="drawer" onClick={(e) => e.stopPropagation()}>
-            <div className="drawer-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ minWidth: 0 }}>
-                <div className="skill-detail-title" style={{ fontSize: 16 }}>{selected.name}</div>
-                <div style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 3, fontFamily: "'SF Mono','Consolas',monospace" }}>{selected.path}</div>
-              </div>
-              <button className="icon-btn" onClick={() => setSelected(null)}>×</button>
-            </div>
-            <div className="drawer-body">{preview()}</div>
-            <div style={{ padding: '10px 16px', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end' }}>
-              <button className="btn btn-sm btn-danger" onClick={(e) => remove(selected, e)}><IconTrash size={13} /> 删除此文件</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
-  );
+  </dialog>;
 }

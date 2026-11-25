@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
+import logging
 import mimetypes
 import os
 if os.name == "nt":
@@ -1215,6 +1217,17 @@ def _build_output_node(path: Path, rel: str) -> dict:
                 'children': children, 'fileCount': file_count}
     m = _file_meta(path, rel)
     m['type'] = 'file'
+    if re.fullmatch(r'稿件版本-[a-f0-9]{32}\.md', path.name):
+        manifest = path.with_suffix('.json')
+        try:
+            if not manifest.is_symlink():
+                metadata = json.loads(manifest.read_text(encoding='utf-8'))
+                if isinstance(metadata, dict):
+                    label = metadata.get('article_title') or metadata.get('name')
+                    if isinstance(label, str) and label.strip():
+                        m['label'] = label.strip()
+        except (OSError, ValueError):
+            pass
     return m
 
 
@@ -5338,9 +5351,9 @@ class PublishRequest(BaseModel):
     media: list[str] = []
     tags: str = ''
     persona: str = ''
-    # 存草稿：仅今日头条支持；其他平台收到草稿请求时明确拒绝。
     draft: bool = False
     theme: str = ''
+    schedule_id: str = ''
 
 
 class ManualPublishRequest(BaseModel):
@@ -5464,7 +5477,7 @@ def _record_successful_publish(title: str, body: str, cfg: dict, profile: str = 
 
 def _run_publish_bg(platform: str, cmd: list, title: str, body: str, cfg: dict,
                     status_file: Path, code_file: Path, profile: str = '',
-                    tags: str = '', ptype: str = '', project_link: dict | None = None) -> None:
+                    tags: str = '', ptype: str = '', project_link: dict | None = None, schedule_id: str = '') -> None:
     """后台线程跑发布脚本（脚本自身把 starting/sms_required/verifying/success/error 写进 status_file）。
     结束后兜底补写终态 + 记 _publish.log + 成功则回流排期。"""
     ok = False
@@ -5493,14 +5506,15 @@ def _run_publish_bg(platform: str, cmd: list, title: str, body: str, cfg: dict,
     except OSError:
         pass
     if ok:
-        recorded = _record_successful_publish(title, body, cfg, profile, tags, ptype, project_link=project_link)
+        recorded = _record_successful_publish(title, body, cfg, profile, tags, ptype,
+                                              project_link=project_link, schedule_id=schedule_id)
         if recorded is False:
             _write_publish_status(status_file, 'success', '发布成功；排期未回填，请在日历选择原记录核对，勿重复发布')
 
 
 def _start_async_publish(platform: str, cmd: list, title: str, body: str, cfg: dict,
                          status_file: Path, code_file: Path, profile: str = '',
-                         tags: str = '', ptype: str = '', project_link: dict | None = None) -> dict:
+                         tags: str = '', ptype: str = '', project_link: dict | None = None, schedule_id: str = '') -> dict:
     """启动异步发布：清旧码/状态 → 起后台线程 → 立即返回。前端轮询 /api/publish/{p}/status，
     遇 sms_required 弹输入框、提交到 /api/publish/{p}/sms。"""
     try:
@@ -5509,7 +5523,7 @@ def _start_async_publish(platform: str, cmd: list, title: str, body: str, cfg: d
         pass
     _write_publish_status(status_file, 'starting', '发布中…（若触发风控会要求短信验证）')
     threading.Thread(target=_run_publish_bg,
-                     args=(platform, cmd, title, body, cfg, status_file, code_file, profile, tags, ptype, project_link),
+                     args=(platform, cmd, title, body, cfg, status_file, code_file, profile, tags, ptype, project_link, schedule_id),
                      daemon=True).start()
     # 关键：**不返回 ok:true**——这只是「已启动」的应答，真正结果要靠轮询 /status。
     # 若这里给 ok:true，旧前端会把它当「已发布」立刻显示成功（假成功 bug，真机踩过）。
@@ -5547,6 +5561,7 @@ async def api_publish(platform: str, req: PublishRequest):
 
 PLATFORM_DRAFTS = {'wechat-oa', 'toutiao'}
 _draft_submissions: set[str] = set()
+_unwritten_draft_receipts: set[tuple[Path, str]] = set()
 
 
 @app.post('/api/platform-drafts/{platform}')
@@ -5555,55 +5570,82 @@ async def api_platform_draft(platform: str, req: ManualPublishRequest):
         raise HTTPException(400, '请打开平台编辑器手动保存草稿')
     if not req.reviewed or not req.title.strip() or not req.body.strip():
         raise HTTPException(400, '请填写文章标题、正文并审核当前稿件')
+    payload = PublishRequest(**req.model_dump(exclude={'reviewed'}), draft=True)
+    return await _submit_publish(platform, payload)
+
+
+async def _submit_publish(platform: str, req: PublishRequest):
+    is_draft = platform == 'wechat-oa' or (platform == 'toutiao' and req.draft)
+    if not is_draft:
+        return await _execute_publish(platform, req, is_draft=False)
     if platform in _draft_submissions:
         raise HTTPException(409, '该平台正在保存草稿，请等待当前操作结束')
     _draft_submissions.add(platform)
     try:
-        payload = PublishRequest(**req.model_dump(exclude={'reviewed', 'schedule_id'}), draft=True)
-        return await _submit_publish(platform, payload, schedule_id=req.schedule_id)
+        return await _execute_publish(platform, req, is_draft=True)
     finally:
         _draft_submissions.discard(platform)
 
 
-async def _submit_publish(platform: str, req: PublishRequest, *, schedule_id: str = ''):
+async def _execute_publish(platform: str, req: PublishRequest, *, is_draft: bool):
+    from easel.project_schedule import canonical_platform
+    from skills.shared.scripts import calendar_store
+
+    schedule_id = req.schedule_id
     project_link = _publish_project_link(req)
-    is_draft = platform == 'wechat-oa' or (platform == 'toutiao' and req.draft)
     draft_content = {'body': req.body, 'tags': req.tags, 'media': req.media,
                      'persona': req.persona, 'theme': req.theme} if is_draft else None
-    receipt_id = ''
     cfg = LOGIN_RUNNERS.get(platform)
     if not cfg:
         raise HTTPException(404, '未知平台')
     backend = cfg['backend']
     if backend == 'unsupported':
         raise HTTPException(400, f"{cfg['name']} 暂不支持一键发布")
-    if schedule_id:
-        if platform not in PLATFORM_DRAFTS or not req.draft:
-            raise HTTPException(400, '日历记录只接受平台草稿操作')
-        from easel.project_schedule import canonical_platform
-        receipt_id = hashlib.sha256(json.dumps([schedule_id, platform, req.title.strip(), draft_content],
-                                              ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-        with _schedule_lock():
-            record = next((item for item in _read_schedule() if item.get('id') == schedule_id), None)
-            if (not record or record.get('kind') == 'event' or record.get('status') == 'published'
-                    or canonical_platform(record.get('platform')) != canonical_platform(cfg['name'])
-                    or any((record.get(k) or '') != (v or '') for k, v in project_link.items())
-                    or (record.get('task_id') or '') != req.task_id
-                    or (record.get('draft_content') or {}).get('persona', record.get('persona') or '') != req.persona):
-                raise HTTPException(409, '原日历记录已变更，请从日历重新打开稿件')
-            if record.get('publication_receipt_id') == receipt_id or receipt_id in record.get('publication_receipts', []):
-                return {'ok': True, 'message': f"该版本已存到{cfg['name']}草稿箱", 'calendarRecorded': True}
-    elif project_link:
-        from easel.project_schedule import canonical_platform
-        with _schedule_lock():
-            pending = [item for item in _read_schedule()
-                       if all(item.get(k) == v for k, v in project_link.items())
-                       and (item.get('kind') or 'content') == 'content'
-                       and item.get('status') != 'published'
-                       and canonical_platform(item.get('platform')) == canonical_platform(cfg['name'])]
-            if len(pending) > 1:
-                raise HTTPException(409, '此版本有多个待发排期，未提交。请先在日历明确原排期；也可人工发布后选择原记录回填。')
+    title = req.title.strip() or req.body.strip()[:20]
     profile = (req.persona or '').strip()
+    tags = req.tags or ''
+    receipt_id = hashlib.sha256(json.dumps(
+        [schedule_id, platform, req.title.strip(), draft_content] if schedule_id else
+        [platform, req.title.strip(), draft_content, project_link], ensure_ascii=False, sort_keys=True,
+    ).encode()).hexdigest() if is_draft else ''
+    receipt_path = SCHEDULE_FILE.with_name(f'.{SCHEDULE_FILE.name}.platform-drafts.json')
+    receipt_key = (receipt_path, receipt_id)
+    already_saved = False
+    if schedule_id or project_link or is_draft:
+        with _schedule_lock():
+            items = _read_schedule(repair_deleted_links=bool(schedule_id))
+            if schedule_id:
+                record = next((item for item in items if item.get('id') == schedule_id), None)
+                if (not record or record.get('kind') == 'event' or record.get('status') == 'published'
+                        or canonical_platform(record.get('platform')) != canonical_platform(cfg['name'])
+                        or any((record.get(k) or '') != (project_link.get(k) or '') for k in ('task_id', 'version_id'))
+                        or (record.get('draft_content') or {}).get('persona', record.get('persona') or '') != req.persona):
+                    raise HTTPException(409, '原日历记录已变更，请从日历重新打开稿件')
+            if is_draft:
+                already_saved = receipt_key in _unwritten_draft_receipts or any(
+                    item.get('publication_receipt_id') == receipt_id or receipt_id in item.get('publication_receipts', [])
+                    for item in items)
+                if schedule_id and record.get('publication_status') == 'draft' and record.get('platform_draft_source') == 'platform':
+                    already_saved |= record.get('title') == title and record.get('draft_content') == draft_content
+                if not already_saved:
+                    try:
+                        already_saved = any(row.get('id') == receipt_id for row in calendar_store.load(receipt_path))
+                    except (OSError, ValueError):
+                        raise HTTPException(500, '无法读取平台草稿回执，请检查内容库后重试') from None
+            if project_link and not schedule_id and not already_saved:
+                pending = [item for item in items if all(item.get(k) == v for k, v in project_link.items())
+                           and (item.get('kind') or 'content') == 'content' and item.get('status') != 'published'
+                           and canonical_platform(item.get('platform')) == canonical_platform(cfg['name'])]
+                if len(pending) > 1:
+                    raise HTTPException(409, '此版本有多个待发排期，请从日历选择原排期后提交')
+    if already_saved:
+        recorded = _record_successful_publish(title, req.body, cfg, profile, tags, '文章' if platform == 'wechat-oa' else '图文',
+                                              status='draft', project_link=project_link, schedule_id=schedule_id,
+                                              receipt_id=receipt_id, draft_content=draft_content)
+        if recorded:
+            _unwritten_draft_receipts.discard(receipt_key)
+        message = '平台草稿已保存，日历已同步' if recorded else '平台草稿已保存，日历同步失败，可重试同步'
+        return {'ok': True, 'message': message, 'calendarRecorded': recorded}
     if profile and (not valid_persona_name(profile) or not profile_exists(profile)):
         raise HTTPException(400, '选择的画像不存在或名称非法')
     if not req.title.strip() and not req.body.strip():
@@ -5622,10 +5664,10 @@ async def _submit_publish(platform: str, req: PublishRequest, *, schedule_id: st
         raise HTTPException(400, f"{cfg['name']} 需附带图片或视频")
     if imgs and vids:
         raise HTTPException(400, '同一条内容不能同时发图片和视频，请二选一')
+    if platform == 'toutiao' and vids:
+        raise HTTPException(400, '今日头条图文仅支持图片，请移除视频素材后再提交')
     if platform in VIDEO_ONLY_PUBLISH and not vids:
         raise HTTPException(400, f"{cfg['name']} 只能发视频，请附带一个视频文件")
-    title = req.title.strip() or req.body.strip()[:20]
-    tags = req.tags or ''
     publish_type = '视频' if vids else ('文章' if platform == 'wechat-oa' else '图文')
     py = sys.executable
     if platform == 'xiaohongshu':
@@ -5650,7 +5692,7 @@ async def _submit_publish(platform: str, req: PublishRequest, *, schedule_id: st
         code_file = PUBLISH_DIR / 'douyin.code'
         cmd += ['--status-file', str(status_file), '--sms-code-file', str(code_file)]
         return _start_async_publish(platform, cmd, title, req.body, cfg, status_file, code_file,
-                                    profile, tags, publish_type, project_link=project_link)
+                                    profile, tags, publish_type, project_link=project_link, schedule_id=schedule_id)
     elif platform == 'toutiao':
         # 头条图文：正文走 --content 直传（不落临时文件）。一键发布 → --exec；
         # 发布页选了「存草稿」时改用 --draft（只落后台草稿箱，不点发布按钮）。
@@ -5726,12 +5768,22 @@ async def _submit_publish(platform: str, req: PublishRequest, *, schedule_id: st
         pass
     calendar_recorded = None
     if ok:
+        if is_draft:
+            try:
+                with calendar_store.transaction(receipt_path) as receipts:
+                    if not any(row.get('id') == receipt_id for row in receipts):
+                        receipts.append({'id': receipt_id})
+            except (OSError, ValueError):
+                _unwritten_draft_receipts.add(receipt_key)
+                logging.getLogger(__name__).exception('无法写入平台草稿回执')
         calendar_recorded = _record_successful_publish(title, req.body, cfg, profile, tags, publish_type,
                                    status='draft' if is_draft else 'published', project_link=project_link,
                                    schedule_id=schedule_id, receipt_id=receipt_id, draft_content=draft_content)
+        if is_draft and calendar_recorded:
+            _unwritten_draft_receipts.discard(receipt_key)
     message = (f"已存到{cfg['name']}草稿箱" if is_draft else '发布成功') if ok else ('未确认草稿保存' if is_draft else '发布失败（见 detail）')
     if ok and calendar_recorded is False:
-        message += '，请在日历核对回填状态'
+        message += '，日历同步失败，可重试同步' if is_draft else '，请在日历核对回填状态'
     return {'ok': ok, 'message': message, 'detail': detail, 'calendarRecorded': calendar_recorded}
 
 
@@ -6202,7 +6254,7 @@ class ProjectDeleteRequest(BaseModel):
 
 def _project_deletion(persona: str, task_id: str, req: ProjectDeleteRequest | None = None):
     from easel import content_deletion
-    with workbench._LOCK:
+    with _schedule_lock(), workbench._LOCK:
         try:
             data = workbench._read(persona)
             _, task = workbench._card(data, task_id)
@@ -6214,19 +6266,53 @@ def _project_deletion(persona: str, task_id: str, req: ProjectDeleteRequest | No
         if target.exists() and not target.is_dir():
             raise HTTPException(409, '项目产物路径不是文件夹，请检查后重试')
         versions = data.get('versions', {}).get(task_id, [])
+        items = _read_schedule()
+        linked = [item for item in items if item.get('task_id') == task_id and (item.get('persona') or '') == persona]
+        pending = [item for item in linked if item.get('kind') != 'event' and item.get('status') != 'published']
+        by_id = {row['id']: row for row in versions}
         try:
-            revision = (task.get('updated_at'), [row['id'] for row in versions])
+            revision = (task.get('updated_at'), list(by_id), linked)
             plan = content_deletion.preview(target, revision=revision, version_count=len(versions))
+            plan['pending_schedule_count'] = len(pending)
+            plan['pending_schedule_without_body'] = sum(not (
+                (item.get('draft_content') or {}).get('body', '').strip()
+                or (item.get('status') == 'draft' and (item.get('note') or '').strip())
+                or by_id.get(item.get('version_id'), {}).get('text', '').strip()) for item in pending)
             if req is None:
                 return plan
             if task.get('session_id') in _RUNNING_CHAT:
                 raise HTTPException(409, '项目对话正在生成，请结束后再删除')
             if req.token != plan['token']:
                 raise HTTPException(409, '项目有更新，请重新查看删除范围')
-            with content_deletion.stage(OUTPUTS_DIR.resolve(), target, keep_assets=bool(plan['asset_count']) and not req.delete_assets,
+            keep_assets = bool(plan['asset_count']) and not req.delete_assets
+            with content_deletion.stage(OUTPUTS_DIR.resolve(), target, keep_assets=keep_assets,
                                         title=task['title']) as retained:
+                original_items = copy.deepcopy(items) if linked else None
+                for item in pending:
+                    version = by_id.get(item.get('version_id'), {})
+                    legacy_body = (item.get('note') or '') if item.get('status') == 'draft' else ''
+                    snapshot = item.get('draft_content') or {}
+                    saved_body = snapshot.get('body') or ''
+                    body = next((text for text in (saved_body, legacy_body, version.get('text', '')) if text.strip()), '')
+                    item['draft_content'] = {**snapshot, 'body': body, 'persona': persona}
+                    if snapshot.get('media'):
+                        project_prefix = f'主题-{task_id}/'
+                        item['draft_content']['media'] = [path for path in snapshot['media']
+                                                          if not path.startswith(project_prefix)
+                                                          or (retained and path.startswith(f'{project_prefix}assets/'))]
+                    if not saved_body.strip() and version.get('article_title') and item.get('title') in {task['title'], '未填写文章标题'}:
+                        item['title'] = version['article_title']
+                for item in linked:
+                    _detach_schedule_project(item, persona)
+                if original_items is not None and original_items != items:
+                    _write_schedule(items)
                 workbench.remove_task(data, task_id)
-                workbench._write(persona, data)
+                try:
+                    workbench._write(persona, data)
+                except OSError:
+                    if original_items is not None and original_items != items:
+                        _write_schedule(original_items)
+                    raise
         except OSError:
             raise HTTPException(500, '无法处理项目文件，请检查内容库的存储权限后重试') from None
     return {'ok': True, 'deleted': task_id, 'retained_assets': retained}
@@ -6301,7 +6387,15 @@ def _schedule_lock():
     return lock(SCHEDULE_FILE)
 
 
-def _read_schedule() -> list[dict]:
+def _detach_schedule_project(item: dict, persona: str) -> None:
+    item.pop('task_id', None)
+    item.pop('version_id', None)
+    item.pop('persona', None)
+    if persona:
+        item.setdefault('profile', persona)
+
+
+def _read_schedule(*, repair_deleted_links: bool = False) -> list[dict]:
     from easel.workbench import deleted_tasks
     from skills.shared.scripts.calendar_store import load
     try:
@@ -6309,6 +6403,7 @@ def _read_schedule() -> list[dict]:
     except (ValueError, OSError):
         raise HTTPException(500, '日历数据损坏或不可读，已停止写入以保护原记录') from None
     deleted_by_profile = {}
+    detached = False
     for item in items:
         if not item.get('task_id'):
             continue
@@ -6319,11 +6414,10 @@ def _read_schedule() -> list[dict]:
             except ValueError:
                 deleted_by_profile[persona] = set()
         if item['task_id'] in deleted_by_profile[persona]:
-            item.pop('task_id', None)
-            item.pop('version_id', None)
-            item.pop('persona', None)
-            if persona:
-                item.setdefault('profile', persona)
+            _detach_schedule_project(item, persona)
+            detached = True
+    if detached and repair_deleted_links:
+        _write_schedule(items)
     return items
 
 

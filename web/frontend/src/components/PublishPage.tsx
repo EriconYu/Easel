@@ -239,9 +239,12 @@ function PersonaPublishPage({ persona, projectDraft, onProjectDraftHandled }: Pr
         if (!loginOf(key)) { setPub(r => ({ ...r, [key]: { status: 'fail', msg: '未登录 · 去账号页登录' } })); continue; }
         if (MEDIA_REQUIRED.has(key) && !payload.media.length) { setPub(r => ({ ...r, [key]: { status: 'fail', msg: '需附带图片/视频' } })); continue; }
         if (VIDEO_ONLY.has(key) && !payload.media.some(p => VIDEO_RE.test(p))) { setPub(r => ({ ...r, [key]: { status: 'fail', msg: `${t.label}只能发视频，请从内容库选一个视频` } })); continue; }
+        if (key === 'toutiao' && payload.media.some(path => VIDEO_RE.test(path))) {
+          setPub(r => ({ ...r, [key]: { status: 'fail', msg: '今日头条图文仅支持图片，请移除视频素材' } })); continue;
+        }
         setPub(r => ({ ...r, [key]: { status: 'publishing', msg: payload.draft ? '存草稿中…可能需 1-2 分钟' : '发布中…可能需 1-2 分钟' } }));
         try {
-          const res = await publishNow(key, payload);
+          const res = await publishNow(key, schedule?.platform === key ? {...payload, schedule_id: schedule.id} : payload);
           if (!aliveRef.current) return;
           if (res.async) await pollAsyncPublish(key, t.label);
           else setPub(r => ({ ...r, [key]: res.ok
@@ -515,7 +518,8 @@ function PersonaPublishPage({ persona, projectDraft, onProjectDraftHandled }: Pr
                 </div>
               )}
               <div className="pv-foot">
-                <span className="pv-hint">{p.hint}{over ? ' · 已超字数' : ''}</span>
+                <span className="pv-hint">{p.hint}{over ? ' · 已超字数' : ''}
+                  {p.key === 'toutiao' && selectedMedia.some(path => VIDEO_RE.test(path)) && ' 今日头条图文仅支持图片，请移除视频素材。'}</span>
                 <div style={{ display: 'flex', gap: 6 }}>
                   <button className="pv-copy" onClick={() => setEditing(isEdit ? null : p.key)}>
                     <IconEdit size={13} />{isEdit ? '完成' : '编辑'}

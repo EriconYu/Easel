@@ -54,6 +54,8 @@ def test_delete_project_keeps_asset_path_and_detaches_calendar(library):
     plan = client.get(route).json()
     assert plan['assets'] == ['原图/封面.png']
     assert plan['version_count'] == 1
+    assert plan['pending_schedule_count'] == 1
+    assert plan['pending_schedule_without_body'] == 0
     assert client.delete(f'/api/output/主题-{task_id}').status_code == 409
     assert delete_project(client, route).json()['retained_assets']
     assert not manuscript.exists() and not manuscript.with_suffix('.json').exists()
@@ -64,6 +66,8 @@ def test_delete_project_keeps_asset_path_and_detaches_calendar(library):
     stored = client.get('/api/schedule').json()[0]
     assert stored['id'] == entry['id'] and stored['status'] == 'scheduled'
     assert 'task_id' not in stored and 'version_id' not in stored
+    assert stored['draft_content']['body'] == version['text']
+    assert stored['draft_content']['persona'] == '甲'
     assert client.put('/api/schedule/' + entry['id'], json={**stored, 'title': '已改标题'}).status_code == 200
 
 

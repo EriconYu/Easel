@@ -214,6 +214,7 @@ export interface OutputMeta {
 /** 产物树节点：文件或目录（目录带 children，可无限嵌套点开）。 */
 export interface OutputNode {
   name: string;
+  label?: string;
   type: 'dir' | 'file';
   path: string;              // outputs 下的相对路径，如 "short-drama/监控诡影/episodes/ep01"
   mtime?: number;
@@ -554,6 +555,8 @@ export interface ContentDeletionPreview {
   assets: string[];
   asset_count: number;
   version_count: number;
+  pending_schedule_count?: number;
+  pending_schedule_without_body?: number;
 }
 export interface ContentDeletionResult {
   retained_assets: boolean;
@@ -741,6 +744,7 @@ export interface PublishResult {
   detail?: string;
   async?: boolean;   // true = 异步发布（抖音，可能触发短信验证），需轮询 publishStatus
   pending?: boolean;
+  calendarRecorded?: boolean;
 }
 
 export interface PublishingPolicy {
@@ -781,7 +785,7 @@ export function exportManualPackage(platform: string, payload: {
  * draft=true 表示存草稿（仅今日头条支持，落后台草稿箱不公开发布）。 */
 export function publishNow(
   platform: string,
-  payload: { title: string; body: string; media: string[]; tags?: string; draft?: boolean; persona?: string },
+  payload: { title: string; body: string; media: string[]; tags?: string; draft?: boolean; persona?: string; schedule_id?: string },
 ): Promise<PublishResult> {
   return request<PublishResult>(`/api/publish/${encodeURIComponent(platform)}`, {
     method: 'POST',

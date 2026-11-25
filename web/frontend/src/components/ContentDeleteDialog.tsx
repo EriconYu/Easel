@@ -73,6 +73,9 @@ export default function ContentDeleteDialog({name, kind, persona, taskId, path, 
         <p>{kind === '项目'
           ? `将删除项目、${plan.version_count} 个稿件版本及成品文件。`
           : kind === '文件夹' ? '将删除文件夹里的成品及其他文件。' : '将删除此文件。'}</p>
+        {!!plan.pending_schedule_count && <p>将保留 {plan.pending_schedule_count} 条未发布排期及可用的稿件正文。
+          {!!plan.pending_schedule_without_body && `其中 ${plan.pending_schedule_without_body} 条需要在日历中补充正文。`}
+          {deleteAssets && '使用这些素材的排期需要重新选择素材。'}</p>}
         {plan.asset_count > 0 && <div className="content-delete-assets">
           <label>
             <input type="checkbox" checked={deleteAssets} disabled={busy}

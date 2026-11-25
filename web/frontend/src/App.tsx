@@ -649,7 +649,6 @@ export default function App() {
       return [undefined, undefined] as const;
     }) : [undefined, undefined] as const;
     const sourceText = item.draft_content?.body ?? (legacyBody.trim() ? legacyBody : version?.text ?? '');
-    if (!sourceText.trim()) throw new Error('这条排期没有可打开的正文，请先关联稿件版本。');
     const sourceTitle = version?.article_title ?? (version && splitArticleHeading(version.text).title);
     const title = sourceTitle && (item.title === project?.title || item.title === '未填写文章标题')
       ? sourceTitle : item.title;
