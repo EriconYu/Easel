@@ -29,6 +29,7 @@ import {
   updateSessionTitle,
   loadActiveId,
   saveActiveId,
+  removeDeletedProjectDrafts,
 } from './lib/store';
 import type { ChatSession, ChatMessage, StreamState } from './lib/store';
 import { splitArticleHeading, withoutRepeatedArticleHeading } from './lib/article';
@@ -930,6 +931,7 @@ export default function App() {
       case 'outputs':
         return <ContentWorkspace persona={selectedPersona} projectId={projectId} onOpenProject={handleOpenProject}
           onProjectDeleted={taskId => {
+            removeDeletedProjectDrafts(selectedPersona, [taskId]);
             setProjectFocus(current => current?.persona === selectedPersona && current.taskId === taskId ? null : current);
             setProjectDraft(current => current?.persona === selectedPersona && current.task_id === taskId ? undefined : current);
           }}

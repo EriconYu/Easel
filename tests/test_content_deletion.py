@@ -13,6 +13,7 @@ def library(tmp_path, monkeypatch):
     root.mkdir()
     monkeypatch.setattr(web, 'OUTPUTS_DIR', root)
     monkeypatch.setattr(web, 'SCHEDULE_FILE', root / '_schedule.json')
+    monkeypatch.setattr(web, 'IDEAS_FILE', root / '_ideas.json')
     monkeypatch.setattr(workbench, 'ROOT', root / '_workbench')
     monkeypatch.setattr(workbench, 'profile_exists', lambda name: name == '甲')
     monkeypatch.setattr(workbench, '_profile', lambda name: '')
@@ -79,8 +80,19 @@ def test_delete_project_with_assets_and_inspiration_can_develop_again(library):
     target = root / f'主题-{task["task_id"]}'
     add_assets(target)
     route = f'/api/content-deletion/project/甲/{task["task_id"]}'
+    before_export = client.get(route).json()
+    export_payload = {'title': '交付', 'body': '正文', 'reviewed': True}
+    package = client.post('/api/manual-publish/zhihu/export', json={
+        **export_payload, 'persona': '甲', 'task_id': task['task_id'],
+    }).json()
+    independent = client.post('/api/manual-publish/zhihu/export', json=export_payload).json()
+    assert client.get(route).json()['package_count'] == 1
+    assert client.request('DELETE', route, json={'token': before_export['token']}).status_code == 409
     assert delete_project(client, route, delete_assets=True).json()['retained_assets'] is False
     assert not target.exists()
+    assert client.get(package['download_url']).status_code == 404
+    assert client.get(independent['download_url']).status_code == 200
+    assert ideas.read(inbox)[0]['developments'] == {}
     assert ideas.search(inbox)[0]['developments'] == {}
     assert ideas.versions(inbox, idea['id'], '甲') == []
     assert ideas.develop(inbox, idea['id'], '甲', '母稿', ['通用'], [])['task']['task_id'] != task['task_id']
@@ -111,12 +123,16 @@ def test_failed_project_index_write_restores_files_and_assets(library, monkeypat
     task_id, version = add_project()
     manuscript = root / version['path']
     asset = add_assets(manuscript.parent)
+    package = client.post('/api/manual-publish/zhihu/export', json={
+        'title': '交付', 'reviewed': True, 'task_id': task_id, 'version_id': version['id'],
+    }).json()
     def unavailable(*args):
         raise OSError('fixture failure')
     monkeypatch.setattr(workbench, '_write', unavailable)
     assert delete_project(client, f'/api/content-deletion/project/_general/{task_id}').status_code == 500
     assert workbench.tasks('')[0]['task_id'] == task_id
     assert manuscript.read_text() == '正文' and asset.is_file()
+    assert client.get(package['download_url']).status_code == 200
     assert not list(root.glob('.content-delete-*'))
 
 

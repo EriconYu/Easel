@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import {
   fetchWorkbenchBrief, saveWorkbenchBrief, fetchWorkbenchSkills, fetchWorkbenchDocuments,
   fetchWorkbenchVersions, saveWorkbenchVersion, fetchLastTurn, fetchWorkbench,
@@ -23,6 +23,7 @@ export interface WorkbenchDiscussionProps {
 const formats: WorkbenchFormat[] = ['母稿', '口播', '平台稿'];
 
 export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = '继续讨论', onVersionSaved }: WorkbenchDiscussionProps) {
+  const articleTitleId = useId();
   const [brief, setBrief] = useState<WorkbenchBrief | null>(null);
   const [skills, setSkills] = useState<WorkbenchSkill[]>([]);
   const [documents, setDocuments] = useState<WorkbenchDocument[]>([]);
@@ -186,9 +187,10 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
         <option value="">选择历史版本</option>
         {versions.map(version => <option key={version.id} value={version.id}>{version.name} · {version.created_at}</option>)}
       </select></label>
+      <label className="workbench-article-title-label" htmlFor={articleTitleId}>文章标题</label>
       <div className="article-title-field">
-        <label>文章标题<input aria-label="文章标题" maxLength={120} value={draft.articleTitle ?? splitArticleHeading(text).title}
-          onChange={e => updateDraft({articleTitle: e.target.value})} /></label>
+        <input id={articleTitleId} aria-label="文章标题" maxLength={120} value={draft.articleTitle ?? splitArticleHeading(text).title}
+          onChange={e => updateDraft({articleTitle: e.target.value})} />
         <ArticleTitleAssistant title={draft.articleTitle ?? splitArticleHeading(text).title} body={text} persona={persona}
           disabled={busy} onApply={articleTitle => updateDraft({articleTitle})} />
       </div>

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 import uuid
 import zipfile
 from collections.abc import Mapping
@@ -26,6 +27,30 @@ MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif",
                     ".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".flv", ".ts"}
 
 
+def project_packages(outputs: Path, persona: str, task_ids: set[str]) -> list[Path]:
+    publish_dir = outputs.resolve() / '_publish'
+    destination = publish_dir / 'manual'
+    if publish_dir.is_symlink() or destination.is_symlink():
+        raise OSError('交付包目录包含符号链接')
+    matches = []
+    for path in sorted(destination.glob('easel-*.zip')):
+        name = re.fullmatch(r'easel-([a-z0-9-]+)-[a-f0-9]{12}\.zip', path.name)
+        if not name or name[1] not in PLATFORMS or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with zipfile.ZipFile(path) as archive:
+                member = archive.getinfo('project-source.json')
+                if member.file_size > 4096:
+                    continue
+                source = json.loads(archive.read(member))
+        except (KeyError, ValueError, zipfile.BadZipFile):
+            continue
+        if (isinstance(source, dict) and source.get('persona') == persona
+                and isinstance(source.get('task_id'), str) and source['task_id'] in task_ids):
+            matches.append(path)
+    return matches
+
+
 def publishing_mode(settings: Mapping[str, str]) -> str:
     """Preserve automatic publishing by default; reject unknown configured modes."""
     mode = settings.get("EASEL_PUBLISH_MODE", "").strip().lower()
@@ -33,7 +58,8 @@ def publishing_mode(settings: Mapping[str, str]) -> str:
 
 
 def build_package(outputs: Path, platform: str, title: str, body: str,
-                  tags: str, media: list[str], reviewed: bool, theme: str = '') -> Path:
+                  tags: str, media: list[str], reviewed: bool, theme: str = '',
+                  *, project_source: dict | None = None) -> Path:
     if platform not in PLATFORMS:
         raise ValueError("未知平台")
     if reviewed is not True:
@@ -86,6 +112,8 @@ def build_package(outputs: Path, platform: str, title: str, body: str,
                            f'<h1 style="font-size:24px">{html.escape(title)}</h1>{paragraphs}'
                            '</article></body></html>')
                 archive.writestr("article.html", article, compress_type=zipfile.ZIP_DEFLATED)
+            if project_source:
+                archive.writestr('project-source.json', json.dumps(project_source, ensure_ascii=False))
         return package
     except Exception:
         package.unlink(missing_ok=True)

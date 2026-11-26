@@ -23,7 +23,7 @@ export default function ContentDeleteDialog({name, kind, persona, taskId, path, 
   const dialog = useRef<HTMLDialogElement>(null);
   const [revision, setRevision] = useState(0);
   const [plan, setPlan] = useState<ContentDeletionPreview | null>(null);
-  const [deleteAssets, setDeleteAssets] = useState(false);
+  const [deleteAssets, setDeleteAssets] = useState(kind === '项目');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -37,7 +37,7 @@ export default function ContentDeleteDialog({name, kind, persona, taskId, path, 
     let active = true;
     setPlan(null);
     setError('');
-    setDeleteAssets(false);
+    setDeleteAssets(kind === '项目');
     const request = kind === '项目' ? previewProjectDeletion(persona, taskId) : previewOutputDeletion(path);
     void request.then(result => {
       if (active) setPlan(result);
@@ -73,6 +73,8 @@ export default function ContentDeleteDialog({name, kind, persona, taskId, path, 
         <p>{kind === '项目'
           ? `将删除项目、${plan.version_count} 个稿件版本及成品文件。`
           : kind === '文件夹' ? '将删除文件夹里的成品及其他文件。' : '将删除此文件。'}</p>
+        {!!plan.package_count && <p>将一并删除本机内容库中的 {plan.package_count} 个发布交付包。</p>}
+        {kind === '项目' && <p>对话历史、原始灵感和已发布记录会保留。</p>}
         {!!plan.pending_schedule_count && <p>将保留 {plan.pending_schedule_count} 条未发布排期及可用的稿件正文。
           {!!plan.pending_schedule_without_body && `其中 ${plan.pending_schedule_without_body} 条需要在日历中补充正文。`}
           {deleteAssets && '使用这些素材的排期需要重新选择素材。'}</p>}

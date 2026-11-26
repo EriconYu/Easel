@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager, nullcontext
 import ipaddress
 from pathlib import Path
 
@@ -50,7 +50,7 @@ from easel.openclaw_cmd import openclaw_base_cmd
 from easel.persona import (load_profile_text, persona_prefix, chat_turn_message,
                            profile_exists, valid_persona_name, _FILE_ORDER)
 from easel.timeouts import TIMEOUT_CHAT, TIMEOUT_DIRECT, TIMEOUT_PRODUCE
-from easel.manual_publish import build_package, publishing_mode
+from easel.manual_publish import build_package, project_packages, publishing_mode
 from easel.direct_api import (DirectAPIError, SYSTEM_PROMPT, api_config, api_mode,
                               history_path, read_settings, stream_chat)
 from easel import harnesses
@@ -5404,16 +5404,13 @@ def api_manual_package_download(filename: str):
 @app.post("/api/manual-publish/{platform}/export")
 def api_manual_publish_export(platform: str, req: ManualPublishRequest):
     """Build a local handoff package; never contact a platform or mark it published."""
-    link = _publish_project_link(req)
-    try:
-        package = build_package(OUTPUTS_DIR, platform, req.title, req.body,
-                                req.tags, req.media, req.reviewed, req.theme)
-    except ValueError as error:
-        raise HTTPException(400, str(error)) from error
-    if link:
-        import zipfile
-        with zipfile.ZipFile(package, 'a') as archive:
-            archive.writestr('project-source.json', json.dumps(link, ensure_ascii=False))
+    with workbench._LOCK if req.task_id or req.version_id else nullcontext():
+        link = _publish_project_link(req)
+        try:
+            package = build_package(OUTPUTS_DIR, platform, req.title, req.body,
+                                    req.tags, req.media, req.reviewed, req.theme, project_source=link)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
     return {"path": package.relative_to(OUTPUTS_DIR.resolve()).as_posix(),
             "filename": package.name, "published": False,
             "download_url": '/api/manual-publish/download/' + package.name}
@@ -6254,7 +6251,7 @@ class ProjectDeleteRequest(BaseModel):
 
 def _project_deletion(persona: str, task_id: str, req: ProjectDeleteRequest | None = None):
     from easel import content_deletion
-    with _schedule_lock(), workbench._LOCK:
+    with idea_store.LOCK, _schedule_lock(), workbench._LOCK:
         try:
             data = workbench._read(persona)
             _, task = workbench._card(data, task_id)
@@ -6271,8 +6268,11 @@ def _project_deletion(persona: str, task_id: str, req: ProjectDeleteRequest | No
         pending = [item for item in linked if item.get('kind') != 'event' and item.get('status') != 'published']
         by_id = {row['id']: row for row in versions}
         try:
-            revision = (task.get('updated_at'), list(by_id), linked)
+            packages = project_packages(OUTPUTS_DIR, persona, {task_id})
+            package_versions = [(path.name, content_deletion.preview(path)['token']) for path in packages]
+            revision = (task.get('updated_at'), list(by_id), linked, package_versions)
             plan = content_deletion.preview(target, revision=revision, version_count=len(versions))
+            plan['package_count'] = len(packages)
             plan['pending_schedule_count'] = len(pending)
             plan['pending_schedule_without_body'] = sum(not (
                 (item.get('draft_content') or {}).get('body', '').strip()
@@ -6285,8 +6285,18 @@ def _project_deletion(persona: str, task_id: str, req: ProjectDeleteRequest | No
             if req.token != plan['token']:
                 raise HTTPException(409, '项目有更新，请重新查看删除范围')
             keep_assets = bool(plan['asset_count']) and not req.delete_assets
-            with content_deletion.stage(OUTPUTS_DIR.resolve(), target, keep_assets=keep_assets,
-                                        title=task['title']) as retained:
+            try:
+                original_ideas = idea_store.read(IDEAS_FILE)
+            except ValueError as error:
+                raise HTTPException(500, str(error)) from None
+            ideas = copy.deepcopy(original_ideas)
+            detach_ideas = idea_store.detach_projects(ideas, persona, {task_id})
+            root = OUTPUTS_DIR.resolve()
+            with ExitStack() as staged, ExitStack() as rollback:
+                retained = staged.enter_context(content_deletion.stage(root, target, keep_assets=keep_assets,
+                                                                       title=task['title']))
+                for path in packages:
+                    staged.enter_context(content_deletion.stage(root, path, keep_assets=False, title=path.name))
                 original_items = copy.deepcopy(items) if linked else None
                 for item in pending:
                     version = by_id.get(item.get('version_id'), {})
@@ -6306,13 +6316,13 @@ def _project_deletion(persona: str, task_id: str, req: ProjectDeleteRequest | No
                     _detach_schedule_project(item, persona)
                 if original_items is not None and original_items != items:
                     _write_schedule(items)
+                    rollback.callback(_write_schedule, original_items)
+                if detach_ideas:
+                    idea_store.write(IDEAS_FILE, ideas)
+                    rollback.callback(idea_store.write, IDEAS_FILE, original_ideas)
                 workbench.remove_task(data, task_id)
-                try:
-                    workbench._write(persona, data)
-                except OSError:
-                    if original_items is not None and original_items != items:
-                        _write_schedule(original_items)
-                    raise
+                workbench._write(persona, data)
+                rollback.pop_all()
         except OSError:
             raise HTTPException(500, '无法处理项目文件，请检查内容库的存储权限后重试') from None
     return {'ok': True, 'deleted': task_id, 'retained_assets': retained}

@@ -121,6 +121,16 @@ def _deleted_tasks(persona):
     except ValueError:
         return set()
 
+def detach_projects(items, persona, task_ids):
+    detached = 0
+    for item in items:
+        developments = item['developments']
+        if developments.get(persona, {}).get('task_id') in task_ids:
+            del developments[persona]
+            detached += 1
+    return detached
+
+
 def delete(path, identifier):
     with LOCK:
         items = read(path); item = find(items, identifier)

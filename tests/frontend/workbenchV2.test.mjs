@@ -18,6 +18,7 @@ function harness(file, api, props, exportName = 'default') {
   let cursor = 0;
   const jsx = {jsx:(type,props)=>({type,props}), jsxs:(type,props)=>({type,props})};
   const react = {
+    useId: () => 'article-title',
     useState:init => {const i=cursor++; if (!(i in values)) values[i]=init; return [values[i],value => {values[i]=typeof value==='function'?value(values[i]):value;}];},
     useEffect:fn => effects.push(fn),
   };

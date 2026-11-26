@@ -17,7 +17,7 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 const automaticPolicy = { mode: 'automated', automaticSubmission: true };
 const manualPolicy = { mode: 'manual', automaticSubmission: false };
 
-function setup(responses = [automaticPolicy], draft = {}) {
+function setup(responses = [automaticPolicy], draft = {}, deletedTasks = []) {
   const state = [];
   const effects = [];
   let cursor = 0;
@@ -46,7 +46,7 @@ function setup(responses = [automaticPolicy], draft = {}) {
     },
     'react/jsx-runtime': { jsx: createElement, jsxs: createElement },
     '../lib/api': {
-      fetchWorkbench: async () => ({tasks: [{task_id: 'project', title: '项目名'}]}),
+      fetchWorkbench: async () => ({tasks: [{task_id: 'project', title: '项目名'}], deleted_tasks: deletedTasks}),
       fetchWorkbenchVersions: async () => ({items: [{id: 'version', text: '**文章名**\n\n正文。'}]}),
       fetchPublishingPolicy() {
         const response = responses[requests++];
@@ -56,6 +56,10 @@ function setup(responses = [automaticPolicy], draft = {}) {
     '../lib/article': loadLibrary('lib/article.ts'),
     '../lib/store': {
       loadPublishDraft: () => draft,
+      recoverableLegacyPublishDraft: () => undefined,
+      removeDeletedProjectDrafts: (persona, ids) => {
+        if (draft.project_source?.persona === persona && ids.includes(draft.project_source.task_id)) draft = {};
+      },
       savePublishDraft: saved => { draft = saved; },
     },
     './PublishPage': { __esModule: true, default: 'automated-page' },
@@ -78,6 +82,16 @@ function setup(responses = [automaticPolicy], draft = {}) {
     draft: () => draft,
   };
 }
+
+test('打开发布页会清理之前删除的项目草稿，即使已设置过文章标题', async () => {
+  const app = setup([manualPolicy], {
+    project_source: {task_id: 'deleted', version_id: 'version', persona: 'travel-brand'},
+    title: '项目名', body: '已删除稿件', articleTitleSet: true,
+  }, ['deleted']);
+  app.render();
+  await settle();
+  assert.equal(app.draft().body, undefined);
+});
 
 test('回收旧项目草稿中的文章标题并保留平台改写', async () => {
   const app = setup([manualPolicy], {

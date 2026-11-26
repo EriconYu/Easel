@@ -12,6 +12,7 @@ export const memoryStorage = () => {
 export function harness(file, api, props, {storage=memoryStorage(),confirm=()=>true,exportName='default'}={}) {
   const values=[],effects=[],pending=[]; let cursor=0;
   const react={
+    useId:()=> 'article-title',
     useState:initial=>{const i=cursor++;if(!(i in values))values[i]=typeof initial==='function'?initial():initial;return [values[i],value=>{values[i]=typeof value==='function'?value(values[i]):value;}];},
     useRef:initial=>{const i=cursor++;if(!(i in values))values[i]={current:initial};return values[i];},
     useMemo:fn=>fn(),useCallback:fn=>fn,

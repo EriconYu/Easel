@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { fetchPublishingPolicy, fetchWorkbench, fetchWorkbenchVersions } from '../lib/api';
 import type { PublishingPolicy } from '../lib/api';
-import { loadPublishDraft, savePublishDraft } from '../lib/store';
+import { loadPublishDraft, recoverableLegacyPublishDraft, removeDeletedProjectDrafts, savePublishDraft } from '../lib/store';
 import { splitArticleHeading, withoutRepeatedArticleHeading } from '../lib/article';
 import AutomatedPublishPage from './PublishPage';
 import ManualPublishPage from './ManualPublishPage';
@@ -20,16 +20,21 @@ export default function PublishingPage(props: ProjectPublishProps) {
     const draft = loadPublishDraft(persona);
     const source = draft.project_source;
     let active = true;
-    if (!source || draft.articleTitleSet) {
+    if (!source && !recoverableLegacyPublishDraft(persona)?.project_source) {
       setDraftReadyFor(persona);
     } else {
-      Promise.all([fetchWorkbench(persona), fetchWorkbenchVersions(persona, source.task_id)])
-        .then(([workbench, versions]) => {
+      fetchWorkbench(persona)
+        .then(async workbench => {
           if (!active) return;
+          const deleted = workbench.deleted_tasks ?? [];
+          removeDeletedProjectDrafts(persona, deleted);
+          if (!source || draft.articleTitleSet || deleted.includes(source.task_id)) return;
           const project = workbench.tasks.find(task => task.task_id === source.task_id);
+          if (!project || project.title !== draft.title) return;
+          const versions = await fetchWorkbenchVersions(persona, source.task_id);
           const version = versions.items.find(item => item.id === source.version_id);
           const title = version?.article_title ?? (version && splitArticleHeading(version.text).title);
-          if (!title || project?.title !== draft.title || JSON.stringify(draft) !== JSON.stringify(loadPublishDraft(persona))) return;
+          if (!active || !title || JSON.stringify(draft) !== JSON.stringify(loadPublishDraft(persona))) return;
           const overrides = Object.fromEntries(Object.entries(draft.overrides)
             .map(([platform, text]) => [platform, withoutRepeatedArticleHeading(text, title)]));
           savePublishDraft({...draft, title, body: withoutRepeatedArticleHeading(draft.body, title),

@@ -64,7 +64,7 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [deletionNotice, setDeletionNotice] = useState<{text: string; retainedPath: string} | null>(null);
+  const [deletionNotice, setDeletionNotice] = useState<{projectId: string; text: string; retainedPath: string} | null>(null);
   const [retainedJump, setRetainedJump] = useState('');
   const scope = useRef(0);
 
@@ -101,7 +101,7 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
       tasks: current.tasks.filter(item => item.task_id !== task.task_id)} : current);
     setSelectedId('');
     props.onProjectDeleted?.(task.task_id);
-    setDeletionNotice({text: result.retained_assets ? '项目已删除，关联素材已保留。' : '项目已删除。',
+    setDeletionNotice({projectId: task.task_id, text: result.retained_assets ? '项目已删除，关联素材已保留。' : '项目已删除。',
       retainedPath: result.retained_assets ? `主题-${task.task_id}/assets` : ''});
   };
 
@@ -140,7 +140,7 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
       </div>}
     </div>
     {(filesOpened || tab === 'files') && <div role="tabpanel" id="content-files-panel" aria-labelledby="content-files-tab" hidden={tab !== 'files'}>
-      <OutputsPage jumpPath={retainedJump || jumpPath} jumpToken={outputsJump?.token}
+      <OutputsPage key={deletionNotice?.projectId} jumpPath={retainedJump || jumpPath} jumpToken={outputsJump?.token}
         onJumpHandled={retainedJump ? () => setRetainedJump('') : onJumpHandled} />
     </div>}
   </div>;

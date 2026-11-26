@@ -105,6 +105,20 @@ export function savePublishDraft(d: PublishDraft, persona = ''): void {
   try { localStorage.setItem(publishKey(persona), JSON.stringify(d)); } catch { /* quota */ }
 }
 
+export function removeDeletedProjectDrafts(persona: string, taskIds: string[]): void {
+  if (!taskIds.length) return;
+  const archiveKey = `${PUBLISH_KEY}:legacy-recovered`;
+  for (const key of [publishKey(persona), PUBLISH_KEY, `${PREVIOUS_BRAND}_publish_draft`, archiveKey]) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const value = JSON.parse(raw);
+      const source = (key === archiveKey ? value?.draft : value)?.project_source;
+      if (source?.persona === persona && taskIds.includes(source.task_id)) localStorage.removeItem(key);
+    } catch { /* preserve unreadable data */ }
+  }
+}
+
 /** Legacy content is never silently claimed. UI must ask before calling restore. */
 export function recoverableLegacyPublishDraft(persona: string): PublishDraft | undefined {
   try {

@@ -26,7 +26,7 @@ export interface WorkbenchResult { updated_at?:string; analyzed_at?:string; card
 export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[]; days:1|3|7; include_search:boolean }
 const wbPost = <T,>(path:string, body:unknown):Promise<T> => request(`/api/workbench/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 const workbenchScope = (persona: string) => encodeURIComponent(persona || '_general');
-export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[]}>{return request(`/api/workbench/${workbenchScope(persona)}`)}
+export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[];deleted_tasks?:string[]}>{return request(`/api/workbench/${workbenchScope(persona)}`)}
 export interface WorkbenchEngines { search:{provider:string;providers:{id:string;label:string;configured:boolean}[];key_configured:boolean}; analysis:{runtime:string;model:string;label:string} }
 export function fetchWorkbenchEngines():Promise<WorkbenchEngines>{return request('/api/workbench/engines')}
 export function saveWorkbenchSearchSettings(body:{provider:string;api_key?:string;clear_key?:boolean}):Promise<WorkbenchEngines['search']>{return wbPost('search-settings',body)}
@@ -555,6 +555,7 @@ export interface ContentDeletionPreview {
   assets: string[];
   asset_count: number;
   version_count: number;
+  package_count?: number;
   pending_schedule_count?: number;
   pending_schedule_without_body?: number;
 }
