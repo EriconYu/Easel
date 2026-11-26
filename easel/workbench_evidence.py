@@ -386,8 +386,12 @@ def _version_text(name, text):
     return name, text
 
 
-def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None, article_title=None):
+def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None, article_title=None,
+                 platform=None, format=None):
     name, text = _version_text(name, text)
+    if (platform is not None or format is not None) and (
+            not source_version_id or platform not in state.PLATFORMS or format not in {'口播', '平台稿'}):
+        raise ValueError('平台稿需要来源版本、目标平台和稿件形式')
     with state._LOCK:
         data = state._read(persona)
         card, existing = state._card(data, task_id)
@@ -396,18 +400,22 @@ def save_version(persona, task_id, name, text, *, source_version_id=None, source
             data = state._read(persona)
             card, existing = state._card(data, task_id)
         return _write_version(persona, data, existing, name, text, source_version_id, source_turn_id,
-                              article_title=article_title)
+                              article_title=article_title, platform=platform, format=format)
 
 
-def _write_version(persona, data, task, name, text, source_version_id, source_turn_id, *, chat_reply_id=None, article_title=None):
+def _write_version(persona, data, task, name, text, source_version_id, source_turn_id, *, chat_reply_id=None,
+                   article_title=None, platform=None, format=None):
     task_id = task['task_id']
     identifier = uuid.uuid4().hex
     brief = {**DEFAULT_BRIEF, **data.get('briefs', {}).get(task_id, {})}
     versions = data.setdefault('versions', {}).setdefault(task_id, [])
     snapshot, provenance = _version_source(task, task['card'], brief, source_version_id, source_turn_id, versions)
-    if source_version_id and article_title is None:
+    if source_version_id:
         source_version = next(version for version in versions if version['id'] == source_version_id)
-        article_title = source_version.get('article_title')
+        if article_title is None:
+            article_title = source_version.get('article_title')
+        if platform is None and format is None:
+            platform, format = source_version.get('platform'), source_version.get('format')
     if chat_reply_id:
         if not source_turn_id:
             snapshot = {'brief': None, 'evidence': [], 'inspiration': None,
@@ -423,6 +431,8 @@ def _write_version(persona, data, task, name, text, source_version_id, source_tu
              'declared_brief': copy.deepcopy(brief)}
     if article_title is not None:
         value['article_title'] = state._text(article_title, 120)
+    if platform and format:
+        value.update(platform=platform, format=format)
     created = []
     try:
         with filename.open('x', encoding='utf-8') as stream:
@@ -436,7 +446,7 @@ def _write_version(persona, data, task, name, text, source_version_id, source_tu
         versions.append(value)
         state._write(persona, data)
     except Exception:
-        if not chat_reply_id and filename in created:
+        if not chat_reply_id and not platform and filename in created:
             raise ValueError('稿件文件已保存但索引失败，请保留原文件并检查存储') from None
         for path in reversed(created):
             path.unlink(missing_ok=True)

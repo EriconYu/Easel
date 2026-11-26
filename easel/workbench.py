@@ -227,10 +227,12 @@ def save_brief(persona, task_id, brief):
     return implementation(persona, task_id, brief)
 
 
-def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None, article_title=None):
+def save_version(persona, task_id, name, text, *, source_version_id=None, source_turn_id=None, article_title=None,
+                 platform=None, format=None):
     from .workbench_evidence import save_version as implementation
     return implementation(persona, task_id, name, text,
-                          source_version_id=source_version_id, source_turn_id=source_turn_id, article_title=article_title)
+                          source_version_id=source_version_id, source_turn_id=source_turn_id, article_title=article_title,
+                          platform=platform, format=format)
 
 
 def list_versions(persona, task_id):

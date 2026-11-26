@@ -188,3 +188,31 @@ def test_api_version_roundtrip_preserves_source_identity(project):
         assert saved['evidence'][0]['text'] == '原文A'
         result = client.get(f'/api/workbench/versions/甲/{project}').json()
         assert result['items'][-1]['provenance']['source_version_id'] == original['id']
+
+
+def test_platform_adaptation_creates_separate_version_and_clean_file_listing(project, monkeypatch):
+    from fastapi.testclient import TestClient
+    from web import app as web
+    root = w.ROOT.parent
+    monkeypatch.setattr(web, 'OUTPUTS_DIR', root)
+    original = evidence.save_version('甲', project, '公众号母稿', '# 原稿标题\n\n原稿正文')
+    original_file = root / original['path']
+    original_bytes = original_file.read_bytes()
+    (original_file.parent / '公开资料.json').write_text('{}', encoding='utf-8')
+    with TestClient(web.app, base_url='http://localhost:7860', headers={'Origin': 'http://localhost:7860'}) as client:
+        result = client.post('/api/workbench/version', json={
+            'persona': '甲', 'task_id': project, 'name': '抖音口播稿', 'text': '新口播正文',
+            'article_title': '新口播标题', 'source_version_id': original['id'], 'platform': '抖音', 'format': '口播',
+        })
+        assert result.status_code == 200, result.text
+        adapted = result.json()
+        items = client.get(f'/api/workbench/versions/甲/{project}').json()['items']
+        assert items == [original, adapted]
+        assert adapted['path'] != original['path'] and original_file.read_bytes() == original_bytes
+        nodes = {node['name']: node for node in client.get('/api/outputs').json()[0]['children']}
+        assert set(nodes) == {original_file.name, (root / adapted['path']).name, '公开资料.json'}
+        assert nodes[original_file.name]['label'] == '原稿标题'
+        assert nodes[original_file.name]['version']['ordinal'] == 1
+        output_version = nodes[(root / adapted['path']).name]['version']
+        assert output_version['ordinal'] == 2 and output_version['source_ordinal'] == 1
+        assert output_version['platform'] == '抖音' and output_version['format'] == '口播'

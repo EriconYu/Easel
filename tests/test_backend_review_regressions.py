@@ -194,7 +194,8 @@ def test_version_api_accepts_explicit_source_and_forwards_it():
     scope = web_functions('WorkbenchVersionRequest', 'api_workbench_version', workbench=SimpleNamespace(save_version=lambda *a, **kw: calls.append((a,kw)) or {'id':'saved'}))
     req = scope['WorkbenchVersionRequest'](persona='fixture', task_id='task', name='draft', text='body', source_turn_id='turn')
     assert asyncio.run(scope['api_workbench_version'](req))['id'] == 'saved'
-    assert calls[0][1] == {'source_version_id': None, 'source_turn_id': 'turn', 'article_title': None}
+    assert calls[0][1] == {'source_version_id': None, 'source_turn_id': 'turn', 'article_title': None,
+                          'platform': None, 'format': None}
 
 
 def test_delete_rejects_version_file_and_containing_directory(tmp_path, monkeypatch):

@@ -238,3 +238,13 @@
   .app-layout:has(.content-workspace) .nav-item { width: auto; flex-shrink: 0; gap: 5px; padding: 8px 9px; font-size: 13px; white-space: nowrap; }
 }
 @media (prefers-reduced-motion: no-preference) { .content-project-item { transition: background .15s, border-color .15s; } }
+
+.project-adaptation-dialog { width: min(700px, calc(100vw - 24px)); }
+.project-adaptation-hint { margin: 6px 0 12px !important; color: var(--text-secondary); font-size: 13px; }
+.project-adaptation-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; border: 0; margin-top: 12px; }
+.project-adaptation-source { grid-column: 1 / -1; }
+.project-adaptation-settings select { min-height: 42px; }
+.project-adaptation-settings textarea { min-height: 64px; }
+.project-adaptation-settings details { margin: 0; }
+.project-adaptation-settings pre { max-height: 220px; overflow: auto; }
+.project-adaptation-settings input, .project-adaptation-settings textarea { width: 100%; }

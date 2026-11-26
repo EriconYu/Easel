@@ -7,10 +7,27 @@ import { IconImage, IconVideo, IconMusic, IconFile, IconFolder, IconRefresh, Ico
 import './OutputsPage.css';
 
 const fileLabels: Record<FileKind, string> = { image: '图片', video: '视频', audio: '音频', text: '文档', binary: '其他文件' };
-const dateFormat = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' });
+const dateFormat = new Intl.DateTimeFormat('sv-SE', { dateStyle: 'short', timeStyle: 'short', hourCycle: 'h23' });
 const displayName = (node: OutputNode) => node.label || node.meta?.title || (node.name === 'assets' && node.type === 'dir' ? '素材' : node.name);
 const isHtml = (name: string) => /\.html?$/i.test(name);
-const sortNodes = (a: OutputNode, b: OutputNode) => (b.mtime || 0) - (a.mtime || 0) || displayName(a).localeCompare(displayName(b), 'zh-CN');
+const extension = (node: OutputNode) => node.name.match(/\.([a-z0-9]+)$/i)?.[1].toUpperCase() || '';
+const itemTimestamp = (node: OutputNode) => Date.parse(node.version?.created_at || '') || (node.mtime || 0) * 1000;
+const compareNames = (a: OutputNode, b: OutputNode) => displayName(a).localeCompare(displayName(b), 'zh-CN', { numeric: true });
+const mediaKinds = new Set<FileKind>(['image', 'video', 'audio']);
+
+function fileType(node: OutputNode) {
+  if (node.type === 'dir') return `${node.fileCount ?? 0} 个文件`;
+  const ext = extension(node);
+  if (node.version) return [node.version.platform, node.version.format === '口播' ? '口播稿' : node.version.format].filter(Boolean).join(' · ') || '稿件版本';
+  if (node.kind && mediaKinds.has(node.kind)) return [fileLabels[node.kind], ext].filter(Boolean).join(' · ');
+  return ext === 'MD' || ext === 'MARKDOWN' ? 'Markdown' : ext || fileLabels[node.kind || 'binary'];
+}
+
+function versionInfo(node: OutputNode) {
+  if (!node.version) return '';
+  return [`第 ${node.version.ordinal} 版`, node.version.name !== displayName(node) && node.version.name,
+    node.version.source_ordinal && `源自第 ${node.version.source_ordinal} 版`].filter(Boolean).join(' · ');
+}
 
 function itemIcon(node: OutputNode, size = 19) {
   if (node.type === 'dir') return <IconFolder size={size} />;
@@ -57,7 +74,8 @@ export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: Outp
   const [error, setError] = useState('');
   const [folderPath, setFolderPath] = useState('');
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState<FileKind | 'all'>('all');
+  const [filter, setFilter] = useState<FileKind | 'all' | 'version'>('all');
+  const [sort, setSort] = useState<'recent' | 'oldest' | 'name'>('recent');
   const [view, setView] = useState<'list' | 'grid'>('list');
   const [selected, setSelected] = useState<OutputNode | null>(null);
   const [deleting, setDeleting] = useState<OutputNode | null>(null);
@@ -71,14 +89,20 @@ export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: Outp
   const term = query.trim().toLocaleLowerCase();
   const searching = !!term || filter !== 'all';
   const matches = searching ? allInFolder.filter(node =>
-    (filter === 'all' || (node.type === 'file' && node.kind === filter)) &&
-    (!term || [displayName(node), node.name, node.path, node.meta?.platform].some(value => value?.toLocaleLowerCase().includes(term))),
+    (filter === 'all' || (filter === 'version' ? !!node.version : node.type === 'file' && node.kind === filter)) &&
+    (!term || [displayName(node), node.name, node.path, node.meta?.platform, fileType(node), versionInfo(node)]
+      .some(value => value?.toLocaleLowerCase().includes(term))),
   ) : entries;
+  const sortNodes = (a: OutputNode, b: OutputNode) => sort === 'name' ? compareNames(a, b) :
+    (sort === 'recent' ? itemTimestamp(b) - itemTimestamp(a) : itemTimestamp(a) - itemTimestamp(b)) || compareNames(a, b);
   const folders = matches.filter(item => item.type === 'dir').sort(sortNodes);
   const files = matches.filter(item => item.type === 'file').sort(sortNodes);
   const deliverablePaths = new Set(trail[0]?.meta?.deliverablePaths);
-  const deliverables = !searching && trail.length === 1 ? files.filter(item => deliverablePaths.has(item.path)) : [];
+  const deliverables = !searching && trail.length === 1 ? files.filter(item => !item.version && deliverablePaths.has(item.path)) : [];
   const deliverableSet = new Set(deliverables.map(item => item.path));
+  const versions = files.filter(item => item.version);
+  const assets = files.filter(item => !item.version && mediaKinds.has(item.kind || 'binary') && !deliverableSet.has(item.path));
+  const documents = files.filter(item => !item.version && !mediaKinds.has(item.kind || 'binary') && !deliverableSet.has(item.path));
 
   const load = useCallback(async () => {
     const request = ++treeRequest.current;
@@ -143,7 +167,9 @@ export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: Outp
   const renderEntry = (node: OutputNode) => {
     const folder = node.type === 'dir';
     const label = displayName(node);
-    const type = folder ? `${node.fileCount ?? 0} 个文件` : fileLabels[node.kind || 'binary'];
+    const type = fileType(node);
+    const timestamp = itemTimestamp(node);
+    const date = timestamp ? dateFormat.format(timestamp) : '';
     const parentPath = node.path.slice(0, Math.max(0, node.path.lastIndexOf('/')));
     const place = searching && parentPath && parentPath !== folderPath ? readablePath(parentPath) : '';
     const cover = view === 'grid' && (node.kind === 'image' ? node.path : node.meta?.cover);
@@ -154,13 +180,14 @@ export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: Outp
           {imageCover ? <img src={mediaUrl(cover)} alt="" loading="lazy" /> : itemIcon(node, view === 'grid' ? 35 : 19)}
         </span>
         <span className="file-browser-name">
-          <strong>{label}</strong>
+          <strong title={node.name === label ? undefined : node.name}>{label}</strong>
+          {node.version && <span className="file-browser-version">{versionInfo(node)}</span>}
           {place && <span className="file-browser-location">{place}</span>}
           {folder && node.meta?.platform && <span className="file-browser-location">{node.meta.platform}</span>}
         </span>
-        <span className="file-browser-detail">{type}{!folder && node.size !== undefined ? ` · ${fileSize(node.size)}` : ''}</span>
-        <span className="file-browser-date">{node.mtime ? dateFormat.format(node.mtime * 1000) : ''}</span>
-        <span className="file-browser-enter">{folder && <IconChevron size={15} />}</span>
+        <span className="file-browser-detail">{type}{!folder && !node.version && node.size !== undefined && <small>{fileSize(node.size)}</small>}</span>
+        <span className="file-browser-date">{date}</span>
+        <span className="file-browser-enter" aria-hidden="true">{folder && <IconChevron size={15} />}</span>
       </button>
       <button type="button" className="file-browser-delete icon-btn" title={folder ? '删除文件夹' : '删除文件'}
         aria-label={`删除${folder ? '文件夹' : '文件'} ${label}`} onClick={() => setDeleting(node)}><IconTrash size={16} /></button>
@@ -169,6 +196,9 @@ export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: Outp
 
   const section = (label: string, nodes: OutputNode[]) => nodes.length > 0 && <section className="file-browser-section">
     <h2>{label} <span>{nodes.length}</span></h2>
+    {view === 'list' && <div className="file-browser-columns" aria-hidden="true">
+      <span>名称</span><span>类型</span><span>{label === '稿件版本' ? '保存时间' : '更新时间'}</span>
+    </div>}
     <ul className={`file-browser-entries is-${view}`}>{nodes.map(renderEntry)}</ul>
   </section>;
 
@@ -191,7 +221,15 @@ export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: Outp
         <label className="file-browser-filter">
           <select aria-label="文件类型" value={filter} onChange={event => setFilter(event.target.value as typeof filter)}>
             <option value="all">所有类型</option>
+            <option value="version">稿件版本</option>
             {Object.entries(fileLabels).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}
+          </select>
+        </label>
+        <label className="file-browser-filter">
+          <select aria-label="文件排序" value={sort} onChange={event => setSort(event.target.value as typeof sort)}>
+            <option value="recent">最近在前</option>
+            <option value="oldest">最早在前</option>
+            <option value="name">按名称</option>
           </select>
         </label>
         <div className="file-browser-views" role="group" aria-label="文件视图">
@@ -209,9 +247,11 @@ export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: Outp
         <p>{searching ? '没有符合条件的文件' : scope ? '这个文件夹是空的' : '文件与素材会显示在这里'}</p>
         {searching && <button type="button" className="btn btn-sm" onClick={() => { setQuery(''); setFilter('all'); }}>清除筛选</button>}
       </div> : <>
-        {section('成品', deliverables)}
         {section('文件夹', folders)}
-        {section(searching ? '匹配的文件' : '文件', files.filter(node => !deliverableSet.has(node.path)))}
+        {section('稿件版本', versions)}
+        {section('成品', deliverables)}
+        {section('媒体素材', assets)}
+        {section('其他文件', documents)}
       </>}
     {selected && <FilePreview key={selected.path} file={selected} displayPath={readablePath(selected.path)}
       onClose={() => setSelected(null)} />}
@@ -248,7 +288,9 @@ function FilePreview({ file, displayPath, onClose }: { file: OutputNode; display
     onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="file-preview-panel">
       <header className="file-preview-header">
-        <div><h2 id="file-preview-title">{displayName(file)}</h2><p title={displayPath}>{displayPath}</p></div>
+        <div><h2 id="file-preview-title">{displayName(file)}</h2>
+          <p>{[fileType(file), versionInfo(file), itemTimestamp(file) && dateFormat.format(itemTimestamp(file))].filter(Boolean).join(' · ')}</p>
+          <p title={displayPath}>{displayPath}</p></div>
         <div className="file-preview-actions">
           {html && <a className="btn btn-sm" href={url} target="_blank" rel="noreferrer">新标签打开 ↗</a>}
           <a className="btn btn-sm" href={url} download={file.name}>下载</a>

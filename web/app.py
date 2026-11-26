@@ -1203,6 +1203,36 @@ def _file_meta(f: Path, rel: str) -> dict:
     return {'name': f.name, 'path': rel, 'kind': _file_kind(f.name), 'mtime': mtime, 'size': size}
 
 
+_VERSION_FILENAME = re.compile(r'稿件版本-([a-f0-9]{32})\.(md|json)')
+
+
+def _output_version(path: Path, identifier: str) -> tuple[str, dict] | None:
+    manifest = path.with_suffix('.json')
+    if manifest.is_symlink():
+        return None
+    try:
+        metadata = json.loads(manifest.read_text(encoding='utf-8'))
+        if not isinstance(metadata, dict) or metadata.get('id') != identifier:
+            return None
+        version = {'id': identifier}
+        for field in ('name', 'created_at', 'platform', 'format'):
+            if isinstance(metadata.get(field), str):
+                version[field] = metadata[field]
+        provenance = metadata.get('provenance')
+        if isinstance(provenance, dict) and isinstance(provenance.get('source_version_id'), str):
+            version['source_id'] = provenance['source_version_id']
+        title = metadata.get('article_title') or ''
+        if not title and not path.is_symlink():
+            with path.open(encoding='utf-8') as stream:
+                opening = stream.read(1024).lstrip()
+            heading = re.match(r'(?:#{1,6}\s+([^\n]+)|\*\*([^\n]+?)\*\*\s*\n)', opening)
+            if heading:
+                title = next(value for value in heading.groups() if value)
+        return title.strip()[:120] if isinstance(title, str) else '', version
+    except (OSError, ValueError):
+        return None
+
+
 def _build_output_node(path: Path, rel: str) -> dict:
     """递归构建产物树节点：文件→file 节点；目录→dir 节点带 children + 递归 fileCount。"""
     if path.is_dir():
@@ -1210,24 +1240,30 @@ def _build_output_node(path: Path, rel: str) -> dict:
         for c in sorted(path.iterdir()):
             if c.name.startswith('.'):   # 嵌套层只跳隐藏文件；_base.mp4 等以 _ 开头的产物要保留
                 continue
+            version_name = _VERSION_FILENAME.fullmatch(c.name)
+            if version_name and version_name[2] == 'json' and c.with_suffix('.md').is_file():
+                continue
             children.append(_build_output_node(c, f'{rel}/{c.name}'))
+        versions = sorted((node for node in children if 'version' in node),
+                          key=lambda node: (node['version'].get('created_at', ''), node['mtime'], node['name']))
+        ordinals = {node['version']['id']: index for index, node in enumerate(versions, 1)}
+        for node in versions:
+            version = node['version']
+            version['ordinal'] = ordinals[version['id']]
+            if source_ordinal := ordinals.get(version.get('source_id')):
+                version['source_ordinal'] = source_ordinal
         mtime = max((x['mtime'] for x in children), default=int(path.stat().st_mtime))
         file_count = sum(x.get('fileCount', 1) if x['type'] == 'dir' else 1 for x in children)
         return {'name': path.name, 'type': 'dir', 'path': rel, 'mtime': mtime,
                 'children': children, 'fileCount': file_count}
     m = _file_meta(path, rel)
     m['type'] = 'file'
-    if re.fullmatch(r'稿件版本-[a-f0-9]{32}\.md', path.name):
-        manifest = path.with_suffix('.json')
-        try:
-            if not manifest.is_symlink():
-                metadata = json.loads(manifest.read_text(encoding='utf-8'))
-                if isinstance(metadata, dict):
-                    label = metadata.get('article_title') or metadata.get('name')
-                    if isinstance(label, str) and label.strip():
-                        m['label'] = label.strip()
-        except (OSError, ValueError):
-            pass
+    version_name = _VERSION_FILENAME.fullmatch(path.name)
+    if version_name and version_name[2] == 'md':
+        output_version = _output_version(path, version_name[1])
+        if output_version:
+            title, m['version'] = output_version
+            m['label'] = title or m['version'].get('name') or '稿件版本'
     return m
 
 
@@ -2917,6 +2953,7 @@ class ChatRequest(BaseModel):
     sessionId: str | None = None
     turnId: str | None = None
     attachments: list[AttachmentRef] = Field(default_factory=list)
+    readOnly: StrictBool = False
 
 
 def _attachment_scope(session_id: str) -> str:
@@ -3376,9 +3413,9 @@ async def _run_harness_chat(req: ChatRequest, sk: str, message: str, runtime: st
         from easel.workbench_evidence import session_web_policy
         web_policy = session_web_policy(req.persona or '', sk)
         request = RunRequest(message, PROJECT_ROOT, env, native_id,
-                             config["models"].get(runtime, ""), config["sandbox"], timeout,
-                             session_key=sk, codex_auto_approve=config.get("codex_auto_approve", False),
-                             web_search=web_policy)
+                             config["models"].get(runtime, ""), 'read-only' if req.readOnly else config["sandbox"], timeout,
+                             session_key=sk, codex_auto_approve=not req.readOnly and config.get("codex_auto_approve", False),
+                             web_search=False if req.readOnly else web_policy)
         await asyncio.wait_for(harnesses.adapter(runtime).run(
             request, receive, ask,
             lambda identifier: harness_store.bind(SESSIONS_DIR, sk, runtime, identifier)), timeout)
@@ -6195,6 +6232,8 @@ class WorkbenchVersionRequest(BaseModel):
     source_version_id: str | None = None
     source_turn_id: str | None = None
     article_title: str | None = Field(default=None, max_length=120)
+    platform: str | None = None
+    format: str | None = None
 
 
 def _workbench_persona_param(persona: str) -> str:
@@ -6347,7 +6386,7 @@ async def api_workbench_versions(persona: str, task_id: str):
 async def api_workbench_version(req: WorkbenchVersionRequest):
     try: return await asyncio.to_thread(workbench.save_version, req.persona, req.task_id, req.name, req.text,
                                        source_version_id=req.source_version_id, source_turn_id=req.source_turn_id,
-                                       article_title=req.article_title)
+                                       article_title=req.article_title, platform=req.platform, format=req.format)
     except ValueError as e: raise HTTPException(400, str(e)) from None
 
 @app.get("/api/workbench/{persona}")

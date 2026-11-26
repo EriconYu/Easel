@@ -19,10 +19,12 @@ export interface WorkbenchDiscussionProps {
   onNavigate: (page: Page) => void;
   discussionLabel?: string;
   onVersionSaved?: (version: WorkbenchVersion) => void;
+  addedVersion?: WorkbenchVersion;
+  labelVersion?: (version: WorkbenchVersion) => string;
 }
 const formats: WorkbenchFormat[] = ['母稿', '口播', '平台稿'];
 
-export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = '继续讨论', onVersionSaved }: WorkbenchDiscussionProps) {
+export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = '继续讨论', onVersionSaved, addedVersion, labelVersion }: WorkbenchDiscussionProps) {
   const articleTitleId = useId();
   const [brief, setBrief] = useState<WorkbenchBrief | null>(null);
   const [skills, setSkills] = useState<WorkbenchSkill[]>([]);
@@ -70,6 +72,10 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
       .finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
   }, [persona, taskId]);
+
+  useEffect(() => {
+    if (addedVersion) setVersions(current => [...current.filter(version => version.id !== addedVersion.id), addedVersion]);
+  }, [addedVersion]);
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -185,7 +191,9 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
           brief: briefFields(selectedBrief), savedText: version.text, savedName: version.name});
       }}>
         <option value="">选择历史版本</option>
-        {versions.map(version => <option key={version.id} value={version.id}>{version.name} · {version.created_at}</option>)}
+        {[...versions].reverse().map(version => <option key={version.id} value={version.id}>
+          {labelVersion ? labelVersion(version) : version.name}
+        </option>)}
       </select></label>
       <label className="workbench-article-title-label" htmlFor={articleTitleId}>文章标题</label>
       <div className="article-title-field">

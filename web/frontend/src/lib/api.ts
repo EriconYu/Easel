@@ -54,6 +54,8 @@ export interface WorkbenchDocument { id: string; title: string; type: string; so
 export interface WorkbenchVersion {
   id: string; name: string; text: string; path: string; created_at: string;
   article_title?: string;
+  platform?: string;
+  format?: '口播' | '平台稿';
   brief: WorkbenchBrief | null; evidence: WorkbenchEvidence[];
   provenance?: {kind: 'version' | 'turn' | 'unverified_turn' | 'manual_declared'; source_version_id?: string; source_turn_id?: string; context_id?: string; context_mode?: string};
   declared_brief?: WorkbenchBrief;
@@ -74,7 +76,8 @@ export function fetchWorkbenchVersions(persona: string, taskId: string): Promise
   return request(`/api/workbench/versions/${workbenchScope(persona)}/${encodeURIComponent(taskId)}`);
 }
 export function saveWorkbenchVersion(persona: string, task_id: string, name: string, text: string,
-  source: {source_version_id?: string; source_turn_id?: string; article_title?: string} = {}): Promise<WorkbenchVersion> {
+  source: {source_version_id?: string; source_turn_id?: string; article_title?: string;
+    platform?: string; format?: WorkbenchVersion['format']} = {}): Promise<WorkbenchVersion> {
   return wbPost('version', {persona, task_id, name, text, ...source});
 }
 export function saveChatVersion(input: {persona: string; session_id: string; reply_id: string; turn_id?: string; title: string; text: string; article_title?: string}): Promise<{task: WorkbenchTask; version: WorkbenchVersion}> {
@@ -215,6 +218,10 @@ export interface OutputMeta {
 export interface OutputNode {
   name: string;
   label?: string;
+  version?: {
+    id: string; ordinal: number; name?: string; created_at?: string;
+    platform?: string; format?: string; source_id?: string; source_ordinal?: number;
+  };
   type: 'dir' | 'file';
   path: string;              // outputs 下的相对路径，如 "short-drama/监控诡影/episodes/ep01"
   mtime?: number;
@@ -506,11 +513,11 @@ export function executeSkill(skill: string, input: string, persona?: string): Pr
 }
 
 /** 一次性 agent 任务（返回整段 markdown）——用于一稿多改 / 爆款拆解 / 发布预检等工具型调用。 */
-export function runAgent(message: string, persona?: string, signal?: AbortSignal): Promise<{ response: string }> {
+export function runAgent(message: string, persona?: string, signal?: AbortSignal, readOnly?: boolean): Promise<{ response: string }> {
   return request('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, persona: persona || undefined }),
+    body: JSON.stringify({ message, persona: persona || undefined, readOnly }),
     signal,
   });
 }

@@ -8,6 +8,7 @@ import type { ProjectPublishDraft } from './ProjectPublishSource';
 import { DiscussionEditor } from './WorkbenchDiscussion';
 import OutputsPage from './OutputsPage';
 import ContentDeleteDialog from './ContentDeleteDialog';
+import ProjectAdaptationDialog from './ProjectAdaptationDialog';
 import './WorkbenchPanel.css';
 import './ContentWorkspace.css';
 
@@ -41,9 +42,12 @@ const validDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)
   && Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 const validTime = (value: string) => /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 const versionDate = new Intl.DateTimeFormat('sv-SE', {dateStyle: 'short', timeStyle: 'medium', hourCycle: 'h23'});
-function versionLabel(version: WorkbenchVersion) {
+function versionLabel(version: WorkbenchVersion, versions: WorkbenchVersion[]) {
   const timestamp = Date.parse(version.created_at);
-  return Number.isFinite(timestamp) ? `${version.name} · ${versionDate.format(timestamp)}` : version.name;
+  const ordinal = versions.findIndex(item => item.id === version.id) + 1;
+  const title = publishArticle(version).title;
+  return [`第 ${ordinal} 版`, title || version.name, title && version.name !== title ? version.name : '',
+    Number.isFinite(timestamp) ? versionDate.format(timestamp) : ''].filter(Boolean).join(' · ');
 }
 
 function publishArticle(version: WorkbenchVersion) {
@@ -162,6 +166,8 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const [versions, setVersions] = useState<WorkbenchVersion[]>([]);
+  const [adapting, setAdapting] = useState(false);
+  const [adaptedVersion, setAdaptedVersion] = useState<WorkbenchVersion>();
   const [versionId, setVersionId] = useState(openedVersionId || '');
   const [versionsLoading, setVersionsLoading] = useState(true);
   const [versionError, setVersionError] = useState('');
@@ -191,13 +197,21 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
   useEffect(() => { void refreshVersions(); return () => { ++versionRequest.current; }; }, [persona, task.task_id]);
   const selectedVersion = versions.find(version => version.id === versionId);
   const openedVersion = versions.find(version => version.id === openedVersionId);
+  const labelVersion = (version: WorkbenchVersion) => versionLabel(version, versions);
+  const addVersion = (saved: WorkbenchVersion) => {
+    ++versionRequest.current;
+    setVersionsLoading(false);
+    setVersionError('');
+    setVersions(current => [...current.filter(version => version.id !== saved.id), saved]);
+    setVersionId(saved.id);
+  };
   const preparePublish = (version: WorkbenchVersion | undefined) => {
     if (!version?.text.trim() || versionsLoading || !onPreparePublish) return;
     setError('');
     try {
       onPreparePublish({
         task_id: task.task_id, persona, version_id: version.id, versionName: version.name,
-        ...publishArticle(version), platform: target,
+        ...publishArticle(version), platform: version.platform || target,
       });
     } catch (reason) { setError(message(reason)); }
   };
@@ -284,6 +298,9 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
         <button className="btn btn-sm" type="button" disabled={savingName} onClick={() => setRenaming(false)}>取消</button>
       </form>}
       <div className="content-project-header-actions">
+        <button type="button" className="btn btn-sm btn-primary" disabled={versionsLoading || !versions.length}
+          title={!versionsLoading && !versions.length ? '先在讨论与稿件中保存一个来源版本' : undefined}
+          onClick={() => setAdapting(true)}>从稿件生成平台稿</button>
         {!renaming && <button className="btn btn-sm" type="button" onClick={() => {
           setProjectName(task.title);
           setRenaming(true);
@@ -292,6 +309,13 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
         <button type="button" className="btn btn-sm btn-danger" onClick={() => setDeleting(true)}>删除项目</button>
       </div>
     </header>
+    {adapting && <ProjectAdaptationDialog persona={persona} taskId={task.task_id} versions={[...versions].reverse()}
+      sourceId={selectedVersion?.id || openedVersion?.id || ''} labelVersion={labelVersion} onClose={() => setAdapting(false)}
+      onSaved={saved => { addVersion(saved); setAdaptedVersion(saved); setAdapting(false); }} />}
+    {adaptedVersion && <p role="status" className="content-library-notice">
+      已保存「{adaptedVersion.article_title || adaptedVersion.name}」为新版本。
+      {onPreparePublish && <button type="button" className="btn btn-sm" onClick={() => preparePublish(adaptedVersion)}>交给发布页</button>}
+    </p>}
     {deleting && <ContentDeleteDialog name={task.title} kind="项目" persona={persona} taskId={task.task_id}
       onDeleted={result => { setDeleting(false); onDeleted(result); }} onClose={() => setDeleting(false)} />}
     {openedVersionId && (openedVersion
@@ -358,13 +382,8 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
       </label>
       {platformNotice(target) && <p className="content-project-meta" role="note">{platformNotice(target)}</p>}
       <DiscussionEditor persona={persona} taskId={task.task_id} onNavigate={onNavigate}
-        onVersionSaved={saved => {
-          ++versionRequest.current;
-          setVersionsLoading(false);
-          setVersionError('');
-          setVersions(current => [...current.filter(version => version.id !== saved.id), saved]);
-          setVersionId(saved.id);
-        }}
+        addedVersion={adaptedVersion} onVersionSaved={addVersion}
+        labelVersion={labelVersion}
         onAction={format => onGenerateWorkbench({task_id: task.task_id, title: task.title}, format, [target])} />
     </section>
     <section className="content-project-card content-project-versions" aria-label="版本交付">
@@ -381,10 +400,10 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
           <span>交付版本</span>
           <span className="content-project-select">
             <select aria-label="交付版本" value={versionId} disabled={versionsLoading || !versions.length}
-              title={selectedVersion && versionLabel(selectedVersion)}
+              title={selectedVersion && labelVersion(selectedVersion)}
               onChange={event => setVersionId(event.target.value)}>
               <option value="">请选择稿件版本</option>
-              {versions.map(version => <option key={version.id} value={version.id}>{versionLabel(version)}</option>)}
+              {[...versions].reverse().map(version => <option key={version.id} value={version.id}>{labelVersion(version)}</option>)}
             </select>
           </span>
         </label>
@@ -421,10 +440,10 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
           <span>稿件版本</span>
           <span className="content-project-select">
             <select aria-label="排期版本" disabled={versionsLoading || !versions.length}
-              title={scheduleVersion && versionLabel(scheduleVersion)}
+              title={scheduleVersion && labelVersion(scheduleVersion)}
               value={scheduleVersionId} onChange={event => setScheduleVersionId(event.target.value)}>
               <option value="">请选择稿件版本</option>
-              {versions.map(version => <option key={version.id} value={version.id}>{versionLabel(version)}</option>)}
+              {[...versions].reverse().map(version => <option key={version.id} value={version.id}>{labelVersion(version)}</option>)}
             </select>
           </span>
         </label>
