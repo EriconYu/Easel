@@ -270,74 +270,90 @@ function PersonaManualPublishPage({ persona, projectDraft, onProjectDraftHandled
     setLinks({}); setRecorded({}); setCheckResult(''); setEditing(null); showToast('旧版草稿已恢复，请重新人工审核');
   };
 
-  return <div className="publish-page">
+  return <div className="publish-page manual-publish-page">
     <div className="publish-editor">
-      <h1 className="page-title"><IconPublish size={21} /> 发布中心 · 人工发布</h1>
-      <ProjectPublishSource draft={projectDraft} persona={persona}
-        hasDraft={(!empty || !!tags.trim() || selectedMedia.length > 0) && !(projectDraft?.scheduleId
-          && schedule?.id === projectDraft.scheduleId && title === projectDraft.title && body === projectDraft.text
-          && tags === (projectDraft.tags || '') && !Object.keys(overrides).length
-          && !Object.values(platformTitles).some(value => value.trim())
-          && JSON.stringify(selectedMedia) === JSON.stringify(projectDraft.media || [])
-          && theme === (projectDraft.theme || WECHAT_THEMES[0][0]))}
-        busy={adapting || checking || !!exporting || saving || !!sendingDraft} onHandled={onProjectDraftHandled} onImport={draft => {
-          stopAdapt();
-          const target = platformCapability(draft.platform);
-          setTitle(draft.title); setArticleTitleSet(true); setBody(draft.text); setPlatforms(target?.manual ? [target.key] : []);
-          setPlatformTitles({}); setOverrides({}); setTags(draft.tags || ''); setSelectedMedia(draft.media || []);
-          setTheme(draft.theme || WECHAT_THEMES[0][0]);
-          setSchedule(draft.scheduleId && target ? {id: draft.scheduleId, platform: target.key} : undefined);
-          setSchedulePlatform(target?.schedule ? target.label : '');
-          setReviewed({}); approvedPayloads.current = {}; setLinks({}); setRecorded({}); setCheckResult(''); setEditing(null);
-          setProjectSource(draft.task_id ? {persona: draft.persona, task_id: draft.task_id, version_id: draft.version_id} : undefined);
-          showToast(target?.manual ? '项目稿件已载入，请核对平台预览。' : '项目稿件已载入，请选择目标平台。');
-        }} />
-      {projectSource && <p>关联内容项目：{projectSource.task_id} · 源稿版本：{projectSource.version_id}。{projectSource.persona!==persona ? '画像不匹配，导出和发布确认已禁用。' : '适配稿不覆盖项目原稿。'}</p>}
-      <p className="page-subtitle">核对平台稿件后，保存草稿或交付到官方编辑器。公开发布由你确认。</p>
-      {legacyDraft && <div className="panel" role="note"><p>{legacyDraft.project_source ? '发现旧版项目草稿，仅可恢复到源画像。' : '旧版草稿未关联画像。'} 不会自动载入；确认恢复会覆盖当前画像的草稿并清空审核。</p><button className="btn btn-sm" disabled={!persona || adapting || checking || !!exporting || saving} onClick={restoreLegacy}>恢复旧版草稿到当前画像</button></div>}
-      <label className="field-label" htmlFor="manual-title">文章标题</label>
-      <div className="article-title-field">
-        <input id="manual-title" className="field" value={title} placeholder="请输入文章标题" onChange={(e) => {
-          setTitle(e.target.value);
-          setArticleTitleSet(true);
-        }} />
-        <ArticleTitleAssistant title={title} body={body} persona={persona} disabled={adapting || saving} onApply={value => {
-          setTitle(value);
-          setArticleTitleSet(true);
-        }} />
+      <div className="manual-publish-draft">
+        <header className="manual-publish-heading">
+          <h1 className="page-title"><IconPublish size={21} /> 当前草稿</h1>
+          {projectSource && <details className="manual-publish-source">
+            <summary>稿件来源</summary>
+            <p>项目：{projectSource.task_id}</p>
+            <p>源稿版本：{projectSource.version_id}</p>
+            <p>适配稿单独保存。</p>
+          </details>}
+        </header>
+        {projectSource && projectSource.persona !== persona && <p className="manual-publish-warning" role="alert">画像不匹配，导出和发布确认已禁用。</p>}
+        <ProjectPublishSource draft={projectDraft} persona={persona}
+          hasDraft={(!empty || !!tags.trim() || selectedMedia.length > 0) && !(projectDraft?.scheduleId
+            && schedule?.id === projectDraft.scheduleId && title === projectDraft.title && body === projectDraft.text
+            && tags === (projectDraft.tags || '') && !Object.keys(overrides).length
+            && !Object.values(platformTitles).some(value => value.trim())
+            && JSON.stringify(selectedMedia) === JSON.stringify(projectDraft.media || [])
+            && theme === (projectDraft.theme || WECHAT_THEMES[0][0]))}
+          busy={adapting || checking || !!exporting || saving || !!sendingDraft} onHandled={onProjectDraftHandled} onImport={draft => {
+            stopAdapt();
+            const target = platformCapability(draft.platform);
+            setTitle(draft.title); setArticleTitleSet(true); setBody(draft.text); setPlatforms(target?.manual ? [target.key] : []);
+            setPlatformTitles({}); setOverrides({}); setTags(draft.tags || ''); setSelectedMedia(draft.media || []);
+            setTheme(draft.theme || WECHAT_THEMES[0][0]);
+            setSchedule(draft.scheduleId && target ? {id: draft.scheduleId, platform: target.key} : undefined);
+            setSchedulePlatform(target?.schedule ? target.label : '');
+            setReviewed({}); approvedPayloads.current = {}; setLinks({}); setRecorded({}); setCheckResult(''); setEditing(null);
+            setProjectSource(draft.task_id ? {persona: draft.persona, task_id: draft.task_id, version_id: draft.version_id} : undefined);
+            showToast(target?.manual ? '项目稿件已载入，请核对平台预览。' : '项目稿件已载入，请选择目标平台。');
+          }} />
+        {legacyDraft && <div className="panel" role="note"><p>{legacyDraft.project_source ? '发现旧版项目草稿，仅可恢复到源画像。' : '旧版草稿未关联画像。'} 不会自动载入；确认恢复会覆盖当前画像的草稿并清空审核。</p><button className="btn btn-sm" disabled={!persona || adapting || checking || !!exporting || saving} onClick={restoreLegacy}>恢复旧版草稿到当前画像</button></div>}
+        <label className="field-label" htmlFor="manual-title">文章标题</label>
+        <div className="article-title-field">
+          <input id="manual-title" className="field" value={title} placeholder="请输入文章标题" onChange={(e) => {
+            setTitle(e.target.value);
+            setArticleTitleSet(true);
+          }} />
+          <ArticleTitleAssistant title={title} body={body} persona={persona} disabled={adapting || saving} onApply={value => {
+            setTitle(value);
+            setArticleTitleSet(true);
+          }} />
+        </div>
+        <div id="manual-platforms-label" className="field-label">目标平台</div>
+        <div className="manual-publish-platforms" role="group" aria-labelledby="manual-platforms-label">
+          {PLATFORMS.map((p) => <button key={p.key} type="button" className={`chip ${platforms.includes(p.key) ? 'active' : ''}`}
+            aria-pressed={platforms.includes(p.key)} onClick={() => toggle(p.key)}>{p.label}</button>)}
+        </div>
+        <label className="field-label" htmlFor="manual-body">正文（母版）</label>
+        <textarea id="manual-body" className="field manual-publish-body" value={body} placeholder="输入文案，选择平台后让 AI 排版，也可以自行编辑。" onChange={(e) => setBody(e.target.value)} />
+        <div className="publish-actions">
+          {adapting ? <button className="btn btn-sm" onClick={stopAdapt}><IconStop size={13} /> 停止排版</button>
+            : <button className="btn btn-sm btn-primary" disabled={empty || !platforms.length} onClick={adapt}><IconSkills size={14} /> AI 排版 / 适配</button>}
+          <button className="btn btn-sm" disabled={empty || checking || adapting || !frozen.length} onClick={check}><IconCheck size={14} />{checking ? '检查中…' : 'AI 辅助检查'}</button>
+        </div>
+        {checkResult && <div className="panel manual-publish-check"><div className="panel-title">AI 辅助检查</div><div className="skill-body-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(checkResult) }} /></div>}
+        <div className="manual-publish-options">
+          <label className="field-label" htmlFor="manual-tags">话题标签（逗号分隔）</label>
+          <input id="manual-tags" className="field" value={tags} placeholder="AI,职场,干货" onChange={(e) => setTags(e.target.value)} />
+          <label className="field-label" style={{ marginTop: 16 }}>媒体素材 · 已选 {selectedMedia.length} 个</label>
+          <p className="pv-hint">从内容库选择图片 / 视频打包导出，也可稍后在官方页面手动选择电脑上的文件。</p>
+          <button className="btn btn-sm" onClick={() => setShowPicker((v) => !v)}>{showPicker ? '收起素材' : '选择媒体'}</button>
+          {selectedMedia.length > 0 && <ul style={{ fontSize: 12 }}>{selectedMedia.map((path) => <li key={path}><button className="pv-copy" onClick={() => toggleMedia(path)} title="移除素材">×</button> {path.split('/').pop()}</li>)}</ul>}
+          {showPicker && <div className="media-grid">
+            {!mediaFiles.length && <p className="dash-empty">内容库暂无图片或视频，可先导出文案。</p>}
+            {mediaFiles.slice(0, 80).map((f) => <button type="button" key={f.path} className={`media-cell ${selectedMedia.includes(f.path) ? 'sel' : ''}`} onClick={() => toggleMedia(f.path)} title={f.path}>
+              {f.kind === 'image' ? <img src={mediaUrl(f.path)} alt={f.name} loading="lazy" /> : <span className="media-vid">视频 · {f.name}</span>}
+              {selectedMedia.includes(f.path) && <span className="media-check">✓</span>}
+            </button>)}
+          </div>}
+          <label className="field-label">排期目标平台
+            <select className="field" aria-label="排期目标平台" value={schedulePlatform} onChange={e => setSchedulePlatform(e.target.value)}>
+              <option value="">请选择排期平台</option>{SCHEDULE_PLATFORMS.map(label => <option key={label} value={label}>{label}</option>)}
+            </select>
+          </label>
+          <p className="pv-hint">排期只保存计划，不执行发布。{platformNotice(schedulePlatform)} 微博尚无发布集成。</p>
+          <div className="publish-actions">
+            <button className="btn btn-sm" disabled={!schedulePlatform || !effectiveTitle(platformCapability(schedulePlatform)!.key).trim() || saving || adapting} onClick={() => addToCalendar(platformCapability(schedulePlatform)!.key)}><IconCalendar size={14} /> 保存到内容日历</button>
+            <button className="btn btn-sm btn-ghost" disabled={empty || adapting} onClick={() => { setProjectSource(undefined); setSchedule(undefined); setTitle(''); setPlatformTitles({}); setBody(''); setTags(''); setOverrides({}); setReviewed({}); setCheckResult(''); }}><IconTrash size={13} /> 清空文案</button>
+          </div>
+          <p className="publish-saved-note">文案自动保存到当前浏览器。审核只针对当前版本；修改标题、正文、标签或素材后，需重新审核。AI 检查仅作参考。</p>
+        </div>
       </div>
-      <label className="field-label" htmlFor="manual-body">正文（母版）</label>
-      <textarea id="manual-body" className="field" style={{ minHeight: 180 }} value={body} placeholder="输入文案，选择平台后让 AI 排版，也可以自行编辑。" onChange={(e) => setBody(e.target.value)} />
-      <label className="field-label" htmlFor="manual-tags">话题标签（逗号分隔）</label>
-      <input id="manual-tags" className="field" value={tags} placeholder="AI,职场,干货" onChange={(e) => setTags(e.target.value)} />
-      <label className="field-label">目标平台</label>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>{PLATFORMS.map((p) => <button key={p.key} className={`chip ${platforms.includes(p.key) ? 'active' : ''}`} onClick={() => toggle(p.key)}>{p.label}</button>)}</div>
-      <label className="field-label" style={{ marginTop: 16 }}>媒体素材 · 已选 {selectedMedia.length} 个</label>
-      <p className="pv-hint">从内容库选择图片 / 视频打包导出，也可稍后在官方页面手动选择电脑上的文件。</p>
-      <button className="btn btn-sm" onClick={() => setShowPicker((v) => !v)}>{showPicker ? '收起素材' : '选择媒体'}</button>
-      {selectedMedia.length > 0 && <ul style={{ fontSize: 12 }}>{selectedMedia.map((path) => <li key={path}><button className="pv-copy" onClick={() => toggleMedia(path)} title="移除素材">×</button> {path.split('/').pop()}</li>)}</ul>}
-      {showPicker && <div className="media-grid">
-        {!mediaFiles.length && <p className="dash-empty">内容库暂无图片或视频，可先导出文案。</p>}
-        {mediaFiles.slice(0, 80).map((f) => <button type="button" key={f.path} className={`media-cell ${selectedMedia.includes(f.path) ? 'sel' : ''}`} onClick={() => toggleMedia(f.path)} title={f.path}>
-          {f.kind === 'image' ? <img src={mediaUrl(f.path)} alt={f.name} loading="lazy" /> : <span className="media-vid">视频 · {f.name}</span>}
-          {selectedMedia.includes(f.path) && <span className="media-check">✓</span>}
-        </button>)}
-      </div>}
-      <label className="field-label">排期目标平台
-        <select className="field" aria-label="排期目标平台" value={schedulePlatform} onChange={e => setSchedulePlatform(e.target.value)}>
-          <option value="">请选择排期平台</option>{SCHEDULE_PLATFORMS.map(label => <option key={label} value={label}>{label}</option>)}
-        </select>
-      </label>
-      <p className="pv-hint">排期只保存计划，不执行发布。{platformNotice(schedulePlatform)} 微博尚无发布集成。</p>
-      <div className="publish-actions">
-        {adapting ? <button className="btn btn-sm" onClick={stopAdapt}><IconStop size={13} /> 停止排版</button>
-          : <button className="btn btn-sm btn-primary" disabled={empty || !platforms.length} onClick={adapt}><IconSkills size={14} /> AI 排版 / 适配</button>}
-        <button className="btn btn-sm" disabled={empty || checking || adapting || !frozen.length} onClick={check}><IconCheck size={14} />{checking ? '检查中…' : 'AI 辅助检查'}</button>
-        <button className="btn btn-sm" disabled={!schedulePlatform || !effectiveTitle(platformCapability(schedulePlatform)!.key).trim() || saving || adapting} onClick={() => addToCalendar(platformCapability(schedulePlatform)!.key)}><IconCalendar size={14} /> 保存到内容日历</button>
-        <button className="btn btn-sm btn-ghost" disabled={empty || adapting} onClick={() => { setProjectSource(undefined); setSchedule(undefined); setTitle(''); setPlatformTitles({}); setBody(''); setTags(''); setOverrides({}); setReviewed({}); setCheckResult(''); }}><IconTrash size={13} /> 清空文案</button>
-      </div>
-      <p className="publish-saved-note">文案自动保存到当前浏览器。审核只针对当前版本；修改标题、正文、标签或素材后，需重新审核。AI 检查仅作参考。</p>
-      {checkResult && <div className="panel"><div className="panel-title">AI 辅助检查</div><div className="skill-body-md" dangerouslySetInnerHTML={{ __html: renderMarkdown(checkResult) }} /></div>}
     </div>
     <div className="publish-previews">
       {!platforms.length && <div className="dash-empty">选择目标平台，在这里预览和审核。</div>}

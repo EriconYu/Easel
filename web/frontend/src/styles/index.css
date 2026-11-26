@@ -1189,10 +1189,12 @@ textarea.field { resize: vertical; min-height: 90px; }
 .publishing-workspace { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .publishing-mode-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
 .publishing-mode-bar .subnav-tab:disabled { opacity: .45; cursor: not-allowed; }
-.publishing-mode-content { flex: 1; min-height: 0; overflow: hidden; }
+.publishing-mode-content { flex: 1; min-height: 0; overflow: hidden; container-type: inline-size; }
 .publish-page { display: flex; height: 100%; overflow: hidden; }
 .publish-editor { width: 46%; min-width: 400px; max-width: 620px; overflow-y: auto; padding: 28px 28px 60px; border-right: 1px solid var(--border); }
 .publish-handoff { margin-bottom: 12px; }
+.publish-handoff-label { color: var(--text-secondary); font-size: 12px; font-weight: 650; }
+.publish-handoff strong { display: block; overflow-wrap: anywhere; }
 .publish-handoff p { margin: 8px 0; }
 .publish-handoff-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .publish-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
@@ -1220,6 +1222,46 @@ textarea.field { resize: vertical; min-height: 90px; }
 .pv-douyin { }
 .pv-weibo .pv-text { }
 @media (max-width: 900px) { .publish-page { flex-direction: column; } .publish-editor { width: 100%; max-width: none; border-right: none; border-bottom: 1px solid var(--border); } }
+
+/* 人工发布：母稿编辑与平台预览 */
+.manual-publish-page { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(0, 1fr); }
+.manual-publish-page > .publish-editor {
+  width: auto; min-width: 0; max-width: none; min-height: 0;
+  padding: 22px clamp(18px, 2.4cqw, 40px) 40px; background: var(--surface);
+  border-right: 1px solid var(--border); border-bottom: 0;
+}
+.manual-publish-draft { max-width: 760px; margin-inline: auto; }
+.manual-publish-heading { display: flex; align-items: start; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.manual-publish-heading .page-title { font-size: 22px; line-height: 1.4; }
+.manual-publish-source { max-width: min(100%, 19rem); padding: 4px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.manual-publish-source summary { cursor: pointer; }
+.manual-publish-source p:first-of-type { margin-top: 5px; }
+.manual-publish-warning { color: var(--red); font-size: 13px; margin-bottom: 10px; }
+.manual-publish-page .publish-handoff {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 8px 16px; padding: 10px 12px; margin-bottom: 14px;
+}
+.manual-publish-page .publish-handoff-content { flex: 1 1 15rem; min-width: 0; }
+.manual-publish-page .publish-handoff strong { font-size: 14px; }
+.manual-publish-page .publish-handoff p { font-size: 12.5px; color: var(--text-secondary); margin: 3px 0; }
+.manual-publish-page .publish-handoff-actions { margin-top: 0; }
+.manual-publish-platforms { display: flex; flex-wrap: wrap; gap: 6px 8px; }
+.manual-publish-platforms .chip { padding-inline: 10px; }
+.manual-publish-page textarea.manual-publish-body { display: block; min-height: clamp(185px, 28vh, 340px); font-size: 14px; line-height: 1.7; }
+.manual-publish-page .publish-actions { margin-top: 12px; }
+.manual-publish-check { margin-top: 12px; }
+.manual-publish-options { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.manual-publish-page > .publish-previews { min-width: 0; min-height: 0; padding: 22px clamp(18px, 2.4cqw, 40px) 40px; }
+.manual-publish-page .pv-card { width: min(100%, 640px); margin-inline: auto; }
+.manual-publish-page .pv-wechat-oa { max-width: 520px; }
+.manual-publish-page .pv-title { overflow-wrap: anywhere; }
+.manual-publish-page .wechat-article-preview { margin-inline: auto; }
+
+@container (width < 820px) {
+  .manual-publish-page { display: block; overflow-y: auto; }
+  .manual-publish-page > .publish-editor { overflow: visible; border-right: 0; border-bottom: 1px solid var(--border); padding-bottom: 24px; }
+  .manual-publish-page > .publish-previews { overflow: visible; }
+}
 
 /* 发布中心 AI版徽标 + 爆款拆解 */
 .pv-badge { margin-left: 8px; font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-end); }

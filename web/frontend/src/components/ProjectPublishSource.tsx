@@ -45,9 +45,12 @@ export default function ProjectPublishSource({ draft, persona, hasDraft, busy, o
 
   if (!pending || (!hasDraft && !busy)) return null;
   return <section className="panel publish-handoff" aria-label="待载入的项目稿件">
-    <strong>{pending.title} · {pending.versionName}</strong>
-    {hasDraft && <p>发布页已有草稿。替换后将使用选定的稿件及其标签和素材。</p>}
-    {busy && <p role="status">请先停止生成或等待当前操作结束，再载入项目稿件。</p>}
+    <div className="publish-handoff-content">
+      <div className="publish-handoff-label">待载入稿件</div>
+      <strong>{pending.title} · {pending.versionName}</strong>
+      {hasDraft && <p>替换后将使用这份稿件及其话题和素材。</p>}
+      {busy && <p role="status">请先停止生成或等待当前操作结束，再载入项目稿件。</p>}
+    </div>
     <div className="publish-handoff-actions">
       <button type="button" className="btn btn-sm btn-primary" disabled={busy} onClick={importDraft}>
         {hasDraft ? '替换现有草稿' : '载入项目稿件'}
