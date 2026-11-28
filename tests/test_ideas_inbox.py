@@ -30,6 +30,20 @@ def test_capture_without_title_preserves_verbatim_and_partial_updates(client):
     assert client.post('/api/ideas', json={'original_text': '  '}).status_code == 400
 
 
+def test_radar_favorite_preserves_original_source_and_is_idempotent(client):
+    source = {'id': 'test-topic', 'title': '测试热榜', 'platform': 'weibo', 'label': '微博',
+              'url': 'https://example.com/topic', 'fetched_at': '2026-11-27T01:00:00Z'}
+    first = client.post('/api/ideas/radar', json={'persona': '甲', 'source': source})
+    assert first.status_code == 200
+    repeated = client.post('/api/ideas/radar', json={'persona': '甲', 'source': {**source, 'title': '热榜标题异动'}})
+    assert repeated.json()['id'] == first.json()['id']
+    items = client.get('/api/ideas', params={'persona': '甲'}).json()
+    assert len(items) == 1 and items[0]['radar_source']['url'] == source['url']
+    result = client.post('/api/ideas/' + first.json()['id'] + '/develop', json={
+        'persona': '甲', 'format': '讨论', 'platforms': ['公众号']})
+    assert result.json()['task']['card']['sources'][0]['url'] == source['url']
+
+
 def test_tenth_idea_explicit_references_versions_and_cancel(client):
     first = client.post('/api/ideas', json={'original_text': '第一条关系原话', 'persona': '甲', 'good_performance': True, 'review_note': '手工复盘'}).json()
     second = client.post('/api/ideas', json={'original_text': '第二条关系经验', 'persona': '甲', 'priority_reuse': True}).json()

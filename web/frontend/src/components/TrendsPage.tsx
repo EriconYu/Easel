@@ -1,6 +1,6 @@
 import { Component, useState, useEffect, useCallback, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { fetchTrendSources, fetchTrends, createIdea } from '../lib/api';
+import { fetchTrendSources, fetchTrends, fetchIdeas, saveRadarIdea } from '../lib/api';
 import type { TrendGroup, TrendSource } from '../lib/api';
 import { IconFire, IconRefresh, IconBookmark, IconCheck, IconChat } from './icons';
 import TrendSourcesDialog from './TrendSourcesDialog';
@@ -15,6 +15,8 @@ interface TrendsPageProps {
   persona: string;
   onOpenProject: (taskId: string) => Promise<void>;
   onNavigate: (page: Page) => void;
+  initialView?: 'persona' | 'raw';
+  onViewChange?: (view: 'persona' | 'raw') => void;
 }
 
 class TrendBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
@@ -30,7 +32,11 @@ export default function TrendsPage(props: TrendsPageProps) {
 }
 
 function RadarPanel(props: TrendsPageProps) {
-  const [view, setView] = useState<'persona' | 'raw'>('persona');
+  const [view, setView] = useState<'persona' | 'raw'>(props.initialView || 'persona');
+  const selectView = (value: typeof view) => {
+    setView(value);
+    props.onViewChange?.(value);
+  };
   const [error, setError] = useState('');
   const [importing, setImporting] = useState(false);
   const importSource = async (source: RadarSource) => {
@@ -43,22 +49,22 @@ function RadarPanel(props: TrendsPageProps) {
     finally { setImporting(false); }
   };
   return <div className="page-scroll trends-page">
-    <div className="page-head"><div><h1 className="page-title"><IconFire size={22} /> 热点雷达</h1>
-      <p className="page-subtitle">查找来源与筛选选题；确定后进入同一个内容项目，统一讨论、依据与稿件。</p>
-      <p className="page-subtitle">{props.persona ? `当前画像：${props.persona}` : '当前未选择画像：请先选择画像，再进行个性化选题。'}</p>
-    </div>{!props.persona && <button className="btn" onClick={() => props.onNavigate('profile')}>选择画像</button>}</div>
-    <div className="trend-platforms" role="group" aria-label="热点雷达视图">
-      <button className={`chip ${view === 'persona' ? 'active' : ''}`} aria-pressed={view === 'persona'} onClick={() => setView('persona')}>画像选题 / 搜索</button>
-      <button className={`chip ${view === 'raw' ? 'active' : ''}`} aria-pressed={view === 'raw'} onClick={() => setView('raw')}>全网原始热榜</button>
+    <div className="radar-content">
+      <header className="page-head"><div><h1 className="page-title"><IconFire size={22} /> 热点雷达</h1>
+        <p className="page-subtitle">{props.persona ? `当前画像：${props.persona}` : '选择画像后可使用个性化选题。'}</p>
+      </div>{!props.persona && <button className="btn btn-sm" onClick={() => props.onNavigate('profile')}>选择画像</button>}</header>
+      <div className="radar-views" role="group" aria-label="热点雷达视图">
+        <button className={`subnav-tab ${view === 'persona' ? 'active' : ''}`} aria-pressed={view === 'persona'} onClick={() => selectView('persona')}>画像选题 / 搜索</button>
+        <button className={`subnav-tab ${view === 'raw' ? 'active' : ''}`} aria-pressed={view === 'raw'} onClick={() => selectView('raw')}>全网原始热榜</button>
+      </div>
+      {error && <p className="notice-error" role="alert">{error}</p>}
+      <p className="radar-description">{view === 'persona'
+        ? '按创作方向查找选题。主动搜索使用你填写的今日意愿，画像用于匹配与分析。'
+        : '按各平台原榜顺序展示，非 AI 推荐。收藏或导入即可保留线索。'}</p>
+      {view === 'persona'
+        ? <WorkbenchPanel key={props.persona} persona={props.persona} onOpenProject={props.onOpenProject} />
+        : <TrendsPanel key={props.persona} persona={props.persona} importing={importing} onImportSource={importSource} />}
     </div>
-    {error && <p className="notice-error" role="alert">{error}</p>}
-    {view === 'persona' ? <>
-      <p className="workbench-muted">搜索词使用今日意愿，画像用于规则匹配及后续 AI 分析，不会把整份画像上传给搜索。点击按钮才开始搜索或模型调用；没有相关热点不凑数。下方显示已保存的意愿与筛选条件。</p>
-      <WorkbenchPanel key={props.persona} persona={props.persona} onOpenProject={props.onOpenProject} />
-    </> : <>
-      <p className="workbench-muted">全网原始热榜：按来源采集和原榜顺序展示，非 AI 推荐，不代表与当前画像相关。导入只保存线索，不会自动调用模型。</p>
-      <TrendsPanel persona={props.persona} importing={importing} onImportSource={importSource} />
-    </>}
   </div>;
 }
 
@@ -78,10 +84,21 @@ function TrendsPanel({ persona, importing, onImportSource }: {persona: string; i
   const discoveryId = useRef(0);
   const initialized = useRef(false);
 
-  const save = async (key: string, title: string, source: string) => {
+  useEffect(() => {
+    let active = true;
+    void fetchIdeas({persona}).then(items => {
+      if (active) setSaved(current => new Set([...current, ...items.flatMap(item =>
+        item.persona === persona && item.radar_source ? [sourceKey(item.radar_source)] : [])]));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [persona]);
+
+  const save = async (source: RadarSource) => {
+    const key = sourceKey(source);
     if (saved.has(key)) return;
+    setSaveError('');
     try {
-      await createIdea({ title, source, status: 'pending' });
+      await saveRadarIdea(persona, source);
       setSaved((prev) => new Set(prev).add(key));
     } catch { setSaveError('收藏失败，请稍后重试。'); }
   };
@@ -139,25 +156,20 @@ function TrendsPanel({ persona, importing, onImportSource }: {persona: string; i
 
   return (
     <div className="raw-trends-panel" aria-busy={loading}>
-      <div className="page-head">
-        <div>
-          <h2 className="page-title">全网原始热榜</h2>
-          <p className="page-subtitle">
-            选择数据源查看原始线索；导入后进入内容项目核验、讨论和创作，不会自动调用模型。
-            {updated > 0 && <span style={{ color: 'var(--text-tertiary)' }}> · {new Date(updated * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 查询</span>}
-          </p>
+      <div className="radar-toolbar">
+        <div className="trend-source-controls" role="group" aria-label="选择热点数据源">
+          {sources.map((p) => (
+            <button key={p.id} className={`chip ${selected.includes(p.id) ? 'active' : ''}`}
+              aria-pressed={selected.includes(p.id)} onClick={() => toggle(p.id)}>{p.label}</button>
+          ))}
         </div>
-        <div className="trend-actions"><button className="btn btn-sm" onClick={() => setManagerOpen(true)}>数据源</button>
-        <button className="btn btn-sm" onClick={() => { void discover(); }} disabled={loading}>
-          <IconRefresh size={14} /> {loading ? '刷新中…' : '刷新'}
-        </button></div>
-      </div>
-
-      <div className="trend-platforms trend-source-controls" role="group" aria-label="选择热点数据源">
-        {sources.map((p) => (
-          <button key={p.id} className={`chip ${selected.includes(p.id) ? 'active' : ''}`}
-            aria-pressed={selected.includes(p.id)} onClick={() => toggle(p.id)}>{p.label}</button>
-        ))}
+        <div className="trend-actions">
+          {updated > 0 && <span className="radar-updated">{new Date(updated * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 查询</span>}
+          <button className="btn btn-sm" onClick={() => setManagerOpen(true)}>数据源</button>
+          <button className="btn btn-sm" onClick={() => { void discover(); }} disabled={loading}>
+            <IconRefresh size={14} /> {loading ? '刷新中…' : '刷新'}
+          </button>
+        </div>
       </div>
 
       {error && <div className="notice-error" role="alert">{error}</div>}
@@ -171,7 +183,7 @@ function TrendsPanel({ persona, importing, onImportSource }: {persona: string; i
       <div className="trend-grid">
         {groups.map((g) => (
           <ContentPanel key={g.platform} className="trend-col" label={`${g.label}热点列表`} header={
-            <div className="trend-col-head"><span className="trend-source-label" title={g.label}>{g.label}</span><span className="trend-count">{g.items.length}</span></div>}>
+            <h2 className="trend-col-head"><span className="trend-source-label" title={g.label}>{g.label}</span><span className="trend-count">{g.items.length}</span></h2>}>
             <div className="trend-source-status">
               {g.fetched_at && <span>采集于 {new Date(g.fetched_at).toLocaleString('zh-CN')}</span>}
               {g.stale && <span> · 缓存已过期</span>}
@@ -182,8 +194,11 @@ function TrendsPanel({ persona, importing, onImportSource }: {persona: string; i
                   {!g.ok ? '该数据源暂时不可用' : '采集成功，暂无热点'}
                 </div>
               )}
-              {g.items.map((it, i) => (
-                <div key={it.id} className="trend-item">
+              {g.items.map((it, i) => {
+                const source = {id: it.id, title: it.title, url: it.url, platform: g.platform, label: g.label,
+                  published_at: it.published_at, fetched_at: g.fetched_at, hot: it.hot};
+                const isSaved = saved.has(sourceKey(source));
+                return <div key={it.id} className="trend-item">
                   <span className={`trend-rank ${i < 3 ? 'top' : ''}`}>{i + 1}</span>
                   <div className="trend-main">
                     <a className="trend-title" href={it.url || undefined} target="_blank" rel="noreferrer"
@@ -191,19 +206,17 @@ function TrendsPanel({ persona, importing, onImportSource }: {persona: string; i
                     {it.hot && <span className="trend-hot">{it.hot}</span>}
                   </div>
                   <div className="trend-item-actions">
-                    <button className="trend-save" title={saved.has(`${g.platform}:${it.id}`) ? '已收藏到选题库' : '收藏到选题库'}
-                      aria-label={`${saved.has(`${g.platform}:${it.id}`) ? '已收藏' : '收藏选题'}：${it.title}`}
-                      onClick={() => save(`${g.platform}:${it.id}`, it.title, g.label)}>
-                      {saved.has(`${g.platform}:${it.id}`) ? <IconCheck size={14} /> : <IconBookmark size={14} />}
+                    <button className="trend-save" title={isSaved ? '已收藏到灵感收件箱' : '收藏到灵感收件箱'}
+                      aria-label={`${isSaved ? '已收藏' : '收藏选题'}：${it.title}`} aria-pressed={isSaved}
+                      onClick={() => void save(source)}>
+                      {isSaved ? <IconCheck size={14} /> : <IconBookmark size={14} />}
                     </button>
                     <button className="trend-use" title={persona ? '保存原始来源并进入内容项目，不自动调用模型' : '请先选择画像'} aria-label={`进入内容项目：${it.title}`}
                       disabled={!persona || importing}
-                      onClick={() => onImportSource({id: it.id, title: it.title, url: it.url,
-                        platform: g.platform, label: g.label, published_at: it.published_at,
-                        fetched_at: g.fetched_at, hot: it.hot})}><IconChat size={14} /><span>进入内容项目</span></button>
+                      onClick={() => onImportSource(source)}><IconChat size={14} /><span>进入内容项目</span></button>
                   </div>
-                </div>
-              ))}
+                </div>;
+              })}
           </ContentPanel>
         ))}
       </div>
@@ -212,4 +225,8 @@ function TrendsPanel({ persona, importing, onImportSource }: {persona: string; i
       }} />}
     </div>
   );
+}
+
+function sourceKey(source: RadarSource) {
+  return JSON.stringify([source.platform, source.id || source.url || source.title]);
 }

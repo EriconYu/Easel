@@ -85,6 +85,28 @@ def create(path, value):
         items.insert(0, item); write(path, items)
         return item
 
+def save_radar_source(path, persona, source):
+    from .radar import normalize_source, source_identity
+    if persona:
+        w._persona(persona)
+    raw = normalize_source(source)
+    identity = source_identity(raw)
+    with LOCK:
+        items = read(path)
+        for item in items:
+            saved = item.get('radar_source')
+            if item['persona'] == persona and isinstance(saved, dict) and source_identity(saved) == identity:
+                return item
+        now = int(time.time())
+        item = {'id': uuid.uuid4().hex[:12], 'title': raw['title'], 'original_text': raw['title'],
+                'source': raw['label'] or raw['platform'], 'radar_source': raw, 'persona': persona,
+                'status': 'pending', 'created': now, 'updated': now, 'note': '', 'topic': '',
+                'tags': [], 'good_performance': False, 'priority_reuse': False, 'publish_url': '',
+                'review_note': '', 'developments': {}}
+        items.insert(0, item)
+        write(path, items)
+        return item
+
 def update(path, identifier, value):
     validate(value)
     with LOCK:
@@ -145,6 +167,8 @@ def _snapshot(item, version=None):
     value = {k: copy.deepcopy(item.get(k)) for k in ('id', 'title', 'original_text', 'note', 'topic', 'tags', 'publish_url', 'review_note')}
     value.update(kind='personal_experience', sha256=digest(item['original_text']),
                  locator=f"idea:{item['id']}:original_text")
+    if item.get('radar_source'):
+        value['radar_source'] = copy.deepcopy(item['radar_source'])
     if version:
         value.update(version_id=version['id'], version_text=version['text'],
                      version_name=version['name'], version_sha256=digest(version['text']),
@@ -196,6 +220,12 @@ def develop(path, identifier, persona, fmt, platforms, references):
         card = {**(existing or {}).get('card', {}), 'task_id': task_id, 'key': 'idea:' + identifier,
                 'title': item['title'], 'sources': [], 'origin': 'inspiration', 'evergreen': False, 'platforms': platforms,
                 'inspiration': _snapshot(item), 'inspiration_references': snapshots}
+        if raw := item.get('radar_source'):
+            card['sources'] = [{
+                'platform': raw['platform'], 'provider': raw['label'], 'kind': 'trend', 'url': raw['url'],
+                'published_at': w._timestamp(raw['published_at']), 'fetched_at': w._timestamp(raw['fetched_at']),
+                'evidence': '从灵感收件箱采用的热榜线索，原文和日期待核验',
+            }]
         task = {**(existing or {}), 'task_id': task_id, 'idea_id': identifier, 'title': item['title'],
                 'card': card, 'status': (existing or {}).get('status', 'todo'),
                 'session_id': (existing or {}).get('session_id') or 'idea-' + uuid.uuid4().hex,

@@ -10,7 +10,8 @@ export const tick=()=>new Promise(resolve=>setImmediate(resolve));
 export function publishHarness(file,overrides={},initial={}) {
  const memory=new Map(),instances=new Map(),calls=[];let current,cursor,nodes=[];
  const props={persona:'甲',...initial};
- const storage={getItem:key=>memory.get(key)??null,setItem:(key,value)=>memory.set(key,value),removeItem:key=>memory.delete(key)};
+ const storage={getItem:key=>memory.get(key)??null,setItem:(key,value)=>memory.set(key,value),removeItem:key=>memory.delete(key),
+  get length(){return memory.size;},key:index=>[...memory.keys()][index]??null};
  const store=loadLibrary('lib/store.ts',{localStorage:storage});
  const react={
   useState:init=>{const instance=current,i=cursor++;if(!(i in instance.values))instance.values[i]=typeof init==='function'?init():init;return [instance.values[i],v=>instance.values[i]=typeof v==='function'?v(instance.values[i]):v];},
@@ -24,10 +25,11 @@ export function publishHarness(file,overrides={},initial={}) {
   publishNow:async(platform,payload)=>{calls.push(['publish',platform,payload]);return {ok:true};},
   savePublishSchedule:async payload=>{calls.push(['schedule',payload]);return payload;},mediaUrl:path=>path,...overrides};
  const modules={'react':react,'react/jsx-runtime':jsx,'../lib/api':api,'../lib/store':store,
-  '../lib/sanitize':{renderMarkdown:text=>text},'./ProjectPublishSource':{__esModule:true,default:'project-source'}};
+  '../lib/sanitize':{renderMarkdown:text=>text},'./ProjectPublishSource':{__esModule:true,default:'project-source',
+   PublishDraftPicker:'draft-picker',PublishScriptField:'script-field',restoreHandoffScript:(saved)=>saved}};
  const exports={};
  runInNewContext(compile(read('components/'+file+'.tsx')),{exports,Date,Error,Set,JSON,Promise,AbortController,
-  setTimeout:()=>0,clearInterval:()=>{},setInterval:()=>0,navigator:{clipboard:{writeText:async text=>calls.push(['copy',text])}},
+  setTimeout:()=>0,clearTimeout:()=>{},clearInterval:()=>{},setInterval:()=>0,navigator:{clipboard:{writeText:async text=>calls.push(['copy',text])}},
   window:{confirm:message=>{calls.push(['confirm',message]);return true;},setTimeout:()=>0},
   require:name=>modules[name]||(name==='../lib/platformCapabilities'?loadLibrary('lib/platformCapabilities.ts'):new Proxy({},{get:(_,key)=>String(key)}))});
  const render=()=>{

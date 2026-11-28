@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from dataclasses import replace
 from unittest.mock import Mock
 
 import pytest
@@ -68,7 +69,19 @@ def test_codex_model_catalog_paginates_without_creating_a_session(tmp_path, monk
     assert result == [{"id": "first-model", "label": "First", "default": True},
                       {"id": "second-model", "label": "Second", "default": False}]
     methods = [message.get("method") for message in audit(tmp_path)]
-    assert methods == ["initialize", "initialized", "model/list", "model/list"]
+    assert methods == ["initialize", "initialized", "model/list", "model/list", "config/read"]
+
+
+@pytest.mark.parametrize(("mode", "expected"), [
+    ("custom-model", [("gpt-6.2-sol", True), ("first-model", False), ("second-model", False)]),
+    ("catalog-model", [("first-model", False), ("second-model", True)]),
+])
+def test_codex_model_catalog_uses_the_configured_default(tmp_path, monkeypatch, mode, expected):
+    monkeypatch.setattr(native_models, "base_command", lambda runtime: [
+        sys.executable, str(FIXTURE), "codex"])
+    request = request_for(tmp_path, "codex", mode=mode)
+    result = asyncio.run(native_models.available_models("codex", request))
+    assert [(item["id"], item["default"]) for item in result] == expected
 
 
 def test_codex_model_catalog_redacts_protocol_errors(tmp_path, monkeypatch):
@@ -512,6 +525,36 @@ def test_cancel_interrupts_native_turn(tmp_path, monkeypatch, runtime, adapter, 
 
     asyncio.run(exercise())
     assert any(message.get("method") == cancel_method for message in audit(tmp_path))
+
+
+def test_codex_steers_active_native_turn(tmp_path):
+    async def exercise():
+        ready = asyncio.get_running_loop().create_future()
+        registered = []
+
+        def register(handler):
+            registered.append(handler)
+            if handler is not None and not ready.done():
+                ready.set_result(handler)
+
+        async def reject(questions):
+            raise AssertionError('unexpected question')
+
+        request = replace(request_for(tmp_path, 'codex', 'hang'), register_steer=register)
+        task = asyncio.create_task(CodexAdapter().run(request, lambda *args: None, reject, lambda _: None))
+        try:
+            steer = await asyncio.wait_for(ready, 5)
+            await steer('补充要求')
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert registered[-1] is None
+
+    asyncio.run(exercise())
+    request = next(msg for msg in audit(tmp_path) if msg.get('method') == 'turn/steer')
+    assert request['params'] == {'threadId': 'native-thread', 'expectedTurnId': 'native-turn',
+                                 'input': [{'type': 'text', 'text': '补充要求'}]}
 
 
 @pytest.mark.parametrize("mode", ["slow-cancel", "ignore-cancel"])

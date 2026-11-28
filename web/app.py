@@ -3301,6 +3301,7 @@ class _HarnessProc(_GatewayHttpProc):
     def __init__(self) -> None:
         super().__init__()
         self._cancel_requested = False
+        self.steer = None
 
     def terminate(self) -> None:
         if self._task is not None:
@@ -3328,10 +3329,10 @@ async def _harness_ask(sk: str, questions: list[dict], emit) -> dict:
         _HARNESS_QUESTIONS.pop(identifier, None)
 
 
-def _capture_workbench_turn(req, sk: str, turn_id: str) -> None:
+def _capture_workbench_turn(req, sk: str, turn_id: str) -> str | None:
     try:
         from easel.workbench_evidence import capture_turn
-        capture_turn(req.persona or '', sk, turn_id, req.message)
+        return capture_turn(req.persona or '', sk, turn_id, req.message, include_current_context=True)
     except Exception as error:
         raise HTTPException(400, f'无法保存本轮项目来源快照：{error}') from error
 
@@ -3404,8 +3405,12 @@ async def _run_harness_chat(req: ChatRequest, sk: str, message: str, runtime: st
         harness_store.bind(SESSIONS_DIR, sk, runtime, native_id)
         _STOPPED_CHAT.discard(sk)
         proc._task = task
+        proc.turn_id = turn_id
+        proc.runtime = runtime
         _RUNNING_CHAT[sk] = proc
-        _capture_workbench_turn(req, sk, turn_id)
+        project_context = _capture_workbench_turn(req, sk, turn_id)
+        if project_context:
+            message = f"{message}\n\n{project_context}"
         _save_turn(pk, "running", "", {"turn_id": turn_id, "runtime": runtime})
         claimed = True
         env = {**read_settings(ENV_FILE), **_proxy_env(), "EASEL_AGENT_RUNTIME": runtime,
@@ -3415,7 +3420,8 @@ async def _run_harness_chat(req: ChatRequest, sk: str, message: str, runtime: st
         request = RunRequest(message, PROJECT_ROOT, env, native_id,
                              config["models"].get(runtime, ""), 'read-only' if req.readOnly else config["sandbox"], timeout,
                              session_key=sk, codex_auto_approve=not req.readOnly and config.get("codex_auto_approve", False),
-                             web_search=False if req.readOnly else web_policy)
+                             web_search=False if req.readOnly else web_policy,
+                             register_steer=lambda handler: setattr(proc, "steer", handler))
         await asyncio.wait_for(harnesses.adapter(runtime).run(
             request, receive, ask,
             lambda identifier: harness_store.bind(SESSIONS_DIR, sk, runtime, identifier)), timeout)
@@ -3497,10 +3503,13 @@ async def _run_direct_chat(req: ChatRequest, sk: str, content, system: str, emit
                 or (OPENCLAW_SESSIONS_DIR / f"{_openclaw_session_id(pk)}.jsonl").is_file()):
             raise DirectAPIError("此会话属于 OpenClaw，请新建会话使用 API 直连")
         history_before = _direct_history_digest(sk)
-        _capture_workbench_turn(req, sk, turn_id)
+        project_context = _capture_workbench_turn(req, sk, turn_id)
+        if project_context:
+            system = f"{system}\n\n{project_context}"
         _save_turn(pk, "running", "", {"turn_id": turn_id})
         claimed = True
         proc._task = asyncio.current_task()
+        proc.turn_id = turn_id
         _RUNNING_CHAT[sk] = proc
         emit("activity", "🧠 正在通过 API 思考…")
 
@@ -3648,6 +3657,7 @@ async def api_chat_stream(req: ChatRequest):
     CLIENT_DONE = object()
 
     async def supervisor():
+        nonlocal message
         sk = req.sessionId or f"web-{int(time.time() * 1000)}"
         pk = f"web:{sk}"                 # 落盘 key（与 /api/chat/last 一致）
         turn_id = req.turnId or uuid.uuid4().hex
@@ -3836,7 +3846,10 @@ async def api_chat_stream(req: ChatRequest):
                 await asyncio.sleep(0.2)
 
             # Only the owner of both locks may replace the session snapshot.
-            _capture_workbench_turn(req, sk, turn_id)
+            project_context = _capture_workbench_turn(req, sk, turn_id)
+            if project_context:
+                message = f"{message}\n\n{project_context}"
+                cmd[-1] = message
             _save_turn(pk, "running", "", {"turn_id": turn_id})
             claimed = True
 
@@ -3890,6 +3903,7 @@ async def api_chat_stream(req: ChatRequest):
                     to_client("error", startup_error)
                 to_client("done", sessionKey=sk)
                 client_q.put_nowait(CLIENT_DONE)
+        proc.turn_id = turn_id
         _RUNNING_CHAT[sk] = proc         # 注册运行中进程（HTTP 模式为伪进程），供 /api/chat/stop
         # 经 gateway 后客户端 stdout 没有 model-fetch 标记（那是独立跑 agent 才有），先立刻
         # 给一个「正在思考」活动指示，随后 token 从共享 raw stream 流进来接管显示。
@@ -4344,6 +4358,25 @@ class StopRequest(BaseModel):
     sessionId: str | None = None
 
 
+async def _stop_chat_process(sk, proc):
+    _STOPPED_CHAT.add(sk)
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+    try:
+        await asyncio.to_thread(proc.wait, timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    deadline = time.monotonic() + 5
+    while _RUNNING_CHAT.get(sk) is proc and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    return _RUNNING_CHAT.get(sk) is not proc
+
+
 @app.post("/api/chat/stop")
 async def api_chat_stop(req: StopRequest):
     """用户显式停止当前会话正在跑的对话 agent：终止进程 → supervisor 收尾释放会话锁 →
@@ -4351,25 +4384,42 @@ async def api_chat_stop(req: StopRequest):
     sk = (req.sessionId or "").strip()
     proc = _RUNNING_CHAT.get(sk) if sk else None
     if proc is not None and proc.poll() is None:
-        _STOPPED_CHAT.add(sk)          # 标记为用户停止，供 supervisor 正常收尾（不报「被中断」）
-        try:
-            proc.terminate()
-        except OSError:
-            pass
-        try:
-            await asyncio.to_thread(proc.wait, timeout=3)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        # supervisor removes the running marker only after persisting the final
-        # snapshot and releasing both session locks.
-        deadline = time.monotonic() + 5
-        while _RUNNING_CHAT.get(sk) is proc and time.monotonic() < deadline:
-            await asyncio.sleep(0.05)
+        await _stop_chat_process(sk, proc)
         return {"stopped": True}
     return {"stopped": False}          # 没有在跑（可能已结束）→ 前端照常清理即可
+
+
+class SteerRequest(BaseModel):
+    sessionId: str = Field(min_length=1, max_length=256)
+    turnId: str = Field(min_length=1, max_length=160)
+    message: str = Field(max_length=100000)
+    attachments: list[AttachmentRef] = Field(default_factory=list)
+
+
+@app.post("/api/chat/steer")
+async def api_chat_steer(req: SteerRequest):
+    attachment_text = _attachment_context(ChatRequest(**req.model_dump()))
+    message = "\n\n".join(part for part in (req.message.strip(), attachment_text) if part)
+    if not message:
+        raise HTTPException(400, "消息不能为空")
+    sk = req.sessionId
+    proc = _RUNNING_CHAT.get(sk)
+    if proc is None or getattr(proc, "turn_id", None) != req.turnId:
+        last = _latest_chat_turn(sk)
+        if proc is None and last.get("turn_id") == req.turnId and last.get("status") == "done":
+            return {"action": "next"}
+        raise HTTPException(409, "当前回复尚未就绪或已切换，消息仍在队列")
+    if getattr(proc, "runtime", None) == "codex":
+        if proc.steer is None:
+            raise HTTPException(409, "当前回复正在启动或收尾，消息仍在队列")
+        try:
+            await proc.steer(message)
+        except HarnessError:
+            raise HTTPException(409, "当前回复暂时无法接收干预，消息仍在队列") from None
+        return {"action": "steered"}
+    if not await _stop_chat_process(sk, proc):
+        raise HTTPException(409, "当前回复还在收尾，消息仍在队列")
+    return {"action": "interrupted"}
 
 
 @app.post("/api/chat")
@@ -6183,14 +6233,30 @@ async def api_workbench_recommend(req: WorkbenchRecommendRequest):
 class WorkbenchAnalysisRequest(BaseModel):
     model_config = {'strict': True, 'extra': 'forbid'}
     persona: str
+    input: WorkbenchRecommendRequest | None = None
 
 
 @app.post('/api/workbench/analyze')
 async def api_workbench_analyze(req: WorkbenchAnalysisRequest):
     from easel.workbench_analysis import analyze_topics
     try:
-        return await analyze_topics(req.persona, PROJECT_ROOT, read_settings(ENV_FILE))
+        selection = None
+        if req.input is not None:
+            if req.input.persona != req.persona or req.input.days not in {1, 3, 7}:
+                raise ValueError('选题画像或来源时间无效')
+            selection = req.input.model_dump(include={'intent', 'exclude', 'budget', 'platforms', 'days'})
+            selection['intent'] = workbench.validate_inputs(req.input.intent, req.input.exclude, req.input.budget, req.input.platforms)
+        return await analyze_topics(req.persona, PROJECT_ROOT, read_settings(ENV_FILE), selection=selection)
     except (ValueError, HarnessError) as error:
+        raise HTTPException(400, str(error)) from None
+
+
+@app.post('/api/workbench/intent-project')
+async def api_workbench_intent_project(req: WorkbenchRecommendRequest):
+    try:
+        return await asyncio.to_thread(workbench.create_intent_project, req.persona, req.intent,
+                                       req.exclude, req.budget, req.platforms)
+    except ValueError as error:
         raise HTTPException(400, str(error)) from None
 
 
@@ -6315,6 +6381,7 @@ def _project_deletion(persona: str, task_id: str, req: ProjectDeleteRequest | No
             plan['pending_schedule_count'] = len(pending)
             plan['pending_schedule_without_body'] = sum(not (
                 (item.get('draft_content') or {}).get('body', '').strip()
+                or ((item.get('draft_content') or {}).get('script') or '').strip()
                 or (item.get('status') == 'draft' and (item.get('note') or '').strip())
                 or by_id.get(item.get('version_id'), {}).get('text', '').strip()) for item in pending)
             if req is None:
@@ -6342,7 +6409,14 @@ def _project_deletion(persona: str, task_id: str, req: ProjectDeleteRequest | No
                     legacy_body = (item.get('note') or '') if item.get('status') == 'draft' else ''
                     snapshot = item.get('draft_content') or {}
                     saved_body = snapshot.get('body') or ''
-                    body = next((text for text in (saved_body, legacy_body, version.get('text', '')) if text.strip()), '')
+                    source_text = version.get('text', '')
+                    if snapshot.get('script') is not None:
+                        body = saved_body
+                    elif version.get('format') == '口播':
+                        body = '' if saved_body == source_text else saved_body
+                        snapshot = {**snapshot, 'script': source_text}
+                    else:
+                        body = next((text for text in (saved_body, legacy_body, source_text) if text.strip()), '')
                     item['draft_content'] = {**snapshot, 'body': body, 'persona': persona}
                     if snapshot.get('media'):
                         project_prefix = f'主题-{task_id}/'
@@ -6481,6 +6555,7 @@ class ScheduledDraftContent(BaseModel):
     media: list[str] = Field(default_factory=list, max_length=32)
     persona: str = ''
     theme: str = ''
+    script: str | None = Field(default=None, max_length=200000)
 
 
 class ScheduleItem(BaseModel):
@@ -6505,6 +6580,21 @@ class ScheduleItem(BaseModel):
 def _annotate_manual_draft(item: dict, req: ScheduleItem) -> None:
     if req.platform_draft_confirmed and req.draft_content and item['kind'] == 'content' and item['status'] in {'draft', 'scheduled'}:
         item.update(publication_status='draft', platform_draft_source='manual')
+
+
+def _validate_calendar_publication(item: dict, previous: dict | None = None) -> None:
+    if item['kind'] != 'content' or item['status'] != 'published':
+        return
+    if previous and previous.get('status') == 'published' and previous.get('url', '') == item['url']:
+        return
+    url = item['url'].strip()
+    try:
+        parsed = urllib.parse.urlsplit(workbench.safe_url(url))
+        if parsed.scheme.lower() != 'https' or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(400, '确认已发布时，请填写作品的 HTTPS 链接') from None
+    item['url'] = url
 
 
 @app.get("/api/schedule")
@@ -6538,9 +6628,10 @@ async def api_schedule_create(req: ScheduleItem):
             "end_date": req.end_date,
             **link,
         }
+        _validate_calendar_publication(item)
         prior = duplicate(items, item)
         if req.draft_content and kind == 'content':
-            item['draft_content'] = req.draft_content.model_dump()
+            item['draft_content'] = req.draft_content.model_dump(exclude_none=True)
         _annotate_manual_draft(item, req)
         if prior is not None:
             if any((prior.get(k) or '') != (item.get(k) or '') for k in ('title','status','url','note','draft_content')):
@@ -6586,11 +6677,12 @@ async def api_schedule_update(sid: str, req: ScheduleItem):
                 }}
                 from easel.project_schedule import canonical_platform
                 same_platform = canonical_platform(it.get('platform')) == canonical_platform(proposed['platform'])
+                _validate_calendar_publication(proposed, it)
                 if kind == 'event' or not same_platform:
                     proposed.pop('draft_content', None)
                     proposed.pop('publication_status', None)
                 if req.draft_content and kind == 'content' and same_platform:
-                    proposed['draft_content'] = req.draft_content.model_dump()
+                    proposed['draft_content'] = req.draft_content.model_dump(exclude_none=True)
                 if (proposed.get('publication_status') == 'draft'
                         and (it.get('draft_content') != proposed.get('draft_content') or it.get('title') != proposed['title'])):
                     proposed.pop('publication_status', None)
@@ -6663,6 +6755,11 @@ async def api_ideas_list(q: str = '', persona: str = '', exclude: str = '', good
 @app.post("/api/ideas")
 async def api_ideas_create(req: dict):
     return _idea_call(idea_store.create, req)
+
+
+@app.post("/api/ideas/radar")
+async def api_ideas_radar(req: RadarImportRequest):
+    return _idea_call(idea_store.save_radar_source, req.persona, req.source)
 
 
 @app.put("/api/ideas/{iid}")

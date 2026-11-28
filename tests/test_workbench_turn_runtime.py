@@ -51,7 +51,7 @@ def _records():
 
 @pytest.mark.parametrize('entry', ['direct', 'api', 'harness', 'harness-api', 'openclaw', 'openclaw-api'])
 @pytest.mark.parametrize('outcome', ['failed', 'cancelled'])
-def test_runtime_finalizes_turns_and_does_not_inherit_failed_context(sandbox, monkeypatch, entry, outcome):
+def test_runtime_finalizes_failed_turns_and_uses_current_project_context_on_followup(sandbox, monkeypatch, entry, outcome):
     runtime = {'direct': 'api', 'api': 'api', 'harness': 'codex', 'harness-api': 'codex',
                'openclaw': 'openclaw', 'openclaw-api': 'openclaw'}[entry]
     monkeypatch.setattr(web, '_chat_backend', lambda sk: runtime)
@@ -61,8 +61,12 @@ def test_runtime_finalizes_turns_and_does_not_inherit_failed_context(sandbox, mo
 
     async def scenario():
         started = asyncio.Event()
+        followup_prompts = []
 
         async def upstream(request):
+            submitted = json.dumps(json.loads(request.content), ensure_ascii=False)
+            if '继续润色' in submitted:
+                followup_prompts.append(submitted)
             if mode['value'] == 'failed':
                 return httpx.Response(503, text='synthetic failure')
             if mode['value'] == 'cancelled':
@@ -79,6 +83,8 @@ def test_runtime_finalizes_turns_and_does_not_inherit_failed_context(sandbox, mo
 
         class Adapter:
             async def run(self, request, emit, ask, bind):
+                if '继续润色' in request.prompt:
+                    followup_prompts.append(request.prompt)
                 if mode['value'] == 'failed':
                     raise web.HarnessError('synthetic failure')
                 if mode['value'] == 'cancelled':
@@ -114,8 +120,9 @@ def test_runtime_finalizes_turns_and_does_not_inherit_failed_context(sandbox, mo
         mode['value'] = 'completed'
         await asyncio.wait_for(run('followup', '继续润色'), 3)
         saved = evidence.save_version('甲', sandbox, '续稿', '合成正文', source_turn_id='followup')
-        expected = ['原文A'] if runtime == 'api' else []
-        assert [row['text'] for row in saved['evidence']] == expected
+        assert saved['provenance']['context_mode'] == 'current_project'
+        assert [row['text'] for row in saved['evidence']] == ['原文B']
+        assert len(followup_prompts) == 1 and '原文B' in followup_prompts[0]
         assert not web._RUNNING_CHAT and not web._session_lock('project-session').locked()
 
     asyncio.run(scenario())

@@ -4,6 +4,7 @@ import type { ContentDeletionResult } from '../lib/api';
 import type { WorkbenchCard, WorkbenchFormat, WorkbenchTask, WorkbenchVersion, ScheduleInput, ScheduleItem } from '../lib/api';
 import type { Page } from './Sidebar';
 import { splitArticleHeading, withoutRepeatedArticleHeading } from '../lib/article';
+import { removeProjectEditorDraft } from '../lib/editorDrafts';
 import type { ProjectPublishDraft } from './ProjectPublishSource';
 import { DiscussionEditor } from './WorkbenchDiscussion';
 import OutputsPage from './OutputsPage';
@@ -16,9 +17,11 @@ export interface ContentWorkspaceProps {
   persona: string;
   projectId?: string;
   openedVersionId?: string;
+  focusEditor?: boolean;
   onOpenProjectChat?: (task: WorkbenchTask) => void;
   onOpenProject: (taskId: string) => Promise<void>;
   onProjectDeleted?: (taskId: string) => void;
+  onOpenProjectVersion?: (taskId: string, versionId: string) => Promise<void>;
   onGenerateWorkbench: (card: Pick<WorkbenchCard, 'task_id' | 'title'>, format: WorkbenchFormat, platforms: string[]) => Promise<void>;
   onNavigate: (page: Page) => void;
   jumpPath?: string;
@@ -58,6 +61,40 @@ function publishArticle(version: WorkbenchVersion) {
   return {title: article.title, text: article.body};
 }
 
+function ProjectReferences({task}: {task: ProjectTask}) {
+  const card = task.card;
+  const intent = task.recommendation_context?.intent;
+  const sources = card?.sources || [];
+  if (!intent && !card?.angle && !sources.length) return null;
+
+  return <section className="content-project-references" aria-label="选题参考">
+    <h4>选题参考</h4>
+    {intent && <p><strong>原始意愿</strong> · {intent}</p>}
+    {card?.angle && <p><strong>建议切入角度</strong> · {card.angle}</p>}
+    {sources.length > 0 && <div className="content-project-reference-sources">
+      <p className="content-project-meta">AI 开始讨论或生成稿件时会收到这些来源链接和已有摘要。</p>
+      <ul>{sources.map((source, index) => {
+        const title = card?.source_title || card?.title || '查看原文';
+        const summary = source.summary?.trim();
+        return <li key={index}>
+          {/^https?:\/\//i.test(source.url)
+            ? <a href={source.url} target="_blank" rel="noreferrer">{title}</a>
+            : <strong>{title}</strong>}
+          <p className="content-project-meta">
+            {[source.provider || source.platform, source.published_at?.slice(0, 10) || '发布日期待核验'].join(' · ')}
+          </p>
+          {summary && <p>{summary.length > 240 ? `${summary.slice(0, 240)}…` : summary}</p>}
+          {summary && summary.length > 240 && <details>
+            <summary>展开已保存的摘要</summary>
+            <p>{summary}</p>
+          </details>}
+          {source.evidence && <p className="content-project-meta">{source.evidence}</p>}
+        </li>;
+      })}</ul>
+    </div>}
+  </section>;
+}
+
 export default function ContentWorkspace(props: ContentWorkspaceProps) {
   const {persona, projectId, outputsJump, onJumpHandled, onOpenProject} = props;
   const jumpPath = outputsJump?.path ?? props.jumpPath;
@@ -81,8 +118,9 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
     setLoading(true);
     setError('');
     fetchWorkbench(persona).then(data => {
-      if (scope.current === request) setSnapshot({persona, tasks: [...data.tasks].sort((a, b) =>
-        (b.updated_at || '').localeCompare(a.updated_at || ''))});
+      if (scope.current !== request) return;
+      for (const taskId of data.deleted_tasks ?? []) removeProjectEditorDraft(persona, taskId);
+      setSnapshot({persona, tasks: [...data.tasks].sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''))});
     }).catch(reason => {
       if (scope.current === request) { setSnapshot(null); setError(message(reason)); }
     }).finally(() => { if (scope.current === request) setLoading(false); });
@@ -145,14 +183,25 @@ export default function ContentWorkspace(props: ContentWorkspaceProps) {
     </div>
     {(filesOpened || tab === 'files') && <div role="tabpanel" id="content-files-panel" aria-labelledby="content-files-tab" hidden={tab !== 'files'}>
       <OutputsPage key={deletionNotice?.projectId} jumpPath={retainedJump || jumpPath} jumpToken={outputsJump?.token}
-        onJumpHandled={retainedJump ? () => setRetainedJump('') : onJumpHandled} />
+        onJumpHandled={retainedJump ? () => setRetainedJump('') : onJumpHandled}
+        projectTaskIds={tasks.map(task => task.task_id)} onOpenProjectVersion={props.onOpenProjectVersion ? (taskId, versionId) => {
+          void props.onOpenProjectVersion?.(taskId, versionId);
+          setTab('projects');
+        } : undefined} />
     </div>}
   </div>;
 }
 
-function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGenerateWorkbench, onNavigate, onPreparePublish, onTaskSaved, onDeleted}: ContentWorkspaceProps & {
+function ContentProject({persona, task, openedVersionId, focusEditor, onOpenProjectChat, onGenerateWorkbench, onNavigate, onPreparePublish, onTaskSaved, onDeleted}: ContentWorkspaceProps & {
   task: ProjectTask; onTaskSaved: (task: ProjectTask) => void; onDeleted: (result: ContentDeletionResult) => void;
 }) {
+  const editor = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (focusEditor) {
+      editor.current?.scrollIntoView({block: 'start'});
+      editor.current?.focus({preventScroll: true});
+    }
+  }, [focusEditor]);
   const [status, setStatus] = useState(task.status);
   const [target, setTarget] = useState(task.card?.platforms?.[0] || '通用');
   const [note, setNote] = useState(task.note || '');
@@ -209,9 +258,12 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
     if (!version?.text.trim() || versionsLoading || !onPreparePublish) return;
     setError('');
     try {
+      const article = publishArticle(version);
       onPreparePublish({
         task_id: task.task_id, persona, version_id: version.id, versionName: version.name,
-        ...publishArticle(version), platform: version.platform || target,
+        title: article.title, text: version.format === '口播' ? '' : article.text,
+        script: version.format === '口播' ? article.text : undefined,
+        platform: version.platform && version.platform !== '通用' ? version.platform : target,
       });
     } catch (reason) { setError(message(reason)); }
   };
@@ -363,15 +415,8 @@ function ContentProject({persona, task, openedVersionId, onOpenProjectChat, onGe
         </div>
       </fieldset>
     </section>
-    <details className="content-project-source"><summary>项目来源与原始线索</summary>
-      <p>来源：{task.source === 'chat' ? '对话' : '工作台'}{task.card?.evergreen ? ' · 常青方向' : ''}</p>
-      {task.card?.source_title && <p>线索原题：{task.card.source_title}</p>}
-      {task.card?.sources?.length ? task.card.sources.map((source, index) => <p key={index}>
-        {source.provider || source.platform} · {source.kind === 'search' ? '联网搜索' : '热榜线索'} · {source.evidence}{' '}
-        {/^https?:\/\//i.test(source.url) && <a href={source.url} target="_blank" rel="noreferrer">查看来源</a>}
-      </p>) : <p>没有外部来源记录；不代表已核验的新闻事实。</p>}
-    </details>
-    <section aria-label="项目创作编辑"><h3>讨论与稿件</h3><p className="content-project-meta">沿用此项目的创作依据、个人灵感与历史版本。完成需手动标记。</p>
+    <section ref={editor} tabIndex={-1} aria-label="项目创作编辑"><h3>讨论与稿件</h3><p className="content-project-meta">沿用此项目的创作依据、个人灵感与历史版本。完成需手动标记。</p>
+      <ProjectReferences task={task} />
       <label className="content-project-field content-project-platform">
         <span>创作目标平台</span>
         <span className="content-project-select">

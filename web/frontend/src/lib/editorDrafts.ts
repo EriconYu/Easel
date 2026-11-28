@@ -30,6 +30,11 @@ const fallback = new Map<string, string>();
 export function draftKey(kind: 'project' | 'chat', persona: string, id: string): string {
   return `easel_editor_draft:v1:${JSON.stringify([kind, persona, id])}`;
 }
+export function removeProjectEditorDraft(persona: string, taskId: string) {
+  const key = draftKey('project', persona, taskId);
+  fallback.delete(key);
+  try { localStorage.removeItem(key); } catch { /* storage unavailable */ }
+}
 export function readDraft<T>(key: string): T | null {
   try {
     const raw = fallback.get(key) ?? localStorage.getItem(key);

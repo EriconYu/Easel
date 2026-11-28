@@ -9,7 +9,7 @@ interface Props {
   onOpenProject: (taskId: string) => Promise<void>;
 }
 // These are source-organisation stages, not the project's publication status.
-const STATES = [{key:'pending', label:'灵感收件箱'}, {key:'doing', label:'整理中'}, {key:'done', label:'已整理'}, {key:'archived', label:'已归档'}];
+const STATES = [{key:'pending', label:'待整理'}, {key:'doing', label:'整理中'}, {key:'done', label:'已整理'}, {key:'archived', label:'已归档'}];
 
 export default function IdeasPage({persona, onOpenProject}: Props) {
   const [ideas, setIdeas] = useState<Idea[]>([]);
@@ -37,7 +37,7 @@ export default function IdeasPage({persona, onOpenProject}: Props) {
   };
   const capture = () => act(async () => {
     await createIdea({original_text: raw, persona, source:'随手记'});
-    setRaw(''); await load(); setNotice('原话已保存，不需要标题。');
+    setRaw(''); setQuery(''); setStatus('pending'); await load(); setNotice('原话已保存。');
   });
   const edit = (idea: Idea) => {
     setEditing(idea);
@@ -59,20 +59,32 @@ export default function IdeasPage({persona, onOpenProject}: Props) {
   const visible = ideas.filter(i => i.status===status && query.toLocaleLowerCase().split(/\s+/).filter(Boolean).every(q =>
     [i.title,i.original_text,i.note,i.topic,i.review_note,...(i.tags||[])].join('\n').toLocaleLowerCase().includes(q)));
   return <div className="page-scroll ideas-page">
+    <div className="inbox-content">
     <div className="page-head"><div><h1 className="page-title"><IconIdea size={21}/> 灵感收件箱</h1>
-      <p className="page-subtitle">保存原话、检索与整理素材；讨论、稿件和版本统一在内容项目中处理。整理阶段不代表发布状态。</p>
-      <p>当前画像：{persona || '未选择（可先保存，进入项目前选择画像）'}</p></div></div>
+      <p className="page-subtitle">随手记下原话，整理后可进入内容项目继续创作。</p>
+      {!persona && <p className="page-subtitle">选择画像后可将灵感发展为内容项目。</p>}</div></div>
     {error && <div className="inbox-error" role="alert">{error}<button className="btn btn-sm" onClick={()=>act(load)}>重试加载</button></div>}
     {notice && <p role="status">{notice}</p>}
-    <section className="card inbox-capture"><label className="field-label" htmlFor="idea-raw">想到什么就记下来 · 不用起标题</label>
+    <section className="card inbox-capture"><label className="field-label" htmlFor="idea-raw">记录原话</label>
       <textarea id="idea-raw" className="field" value={raw} onChange={e=>setRaw(e.target.value)} placeholder="零碎的原话、几句好话、还没想清楚的问题……"/>
-      <button className="btn btn-primary" disabled={busy||!raw.trim()} onClick={capture}>保存原话</button></section>
-    <div className="inbox-toolbar"><input aria-label="搜索灵感" className="field" value={query} onChange={e=>setQuery(e.target.value)} placeholder="字面搜索原话 / 备注 / 话题 / 标签"/>
-      {STATES.map(s=><button key={s.key} className={`chip ${status===s.key?'active':''}`} onClick={()=>setStatus(s.key)}>{s.label} {ideas.filter(i=>i.status===s.key).length}</button>)}</div>
+      <div className="inbox-capture-actions"><button className="btn btn-primary" disabled={busy||!raw.trim()} onClick={capture}>保存原话</button></div>
+    </section>
+    <div className="inbox-toolbar">
+      <div role="group" aria-label="筛选整理阶段" className="inbox-states">
+        {STATES.map(s=><button key={s.key} className={`chip ${status===s.key?'active':''}`} aria-pressed={status===s.key}
+          onClick={()=>setStatus(s.key)}>{s.label} <span>{ideas.filter(i=>i.status===s.key).length}</span></button>)}
+      </div>
+      <input aria-label="搜索灵感" type="search" className="field" value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索原话、备注、话题或标签"/>
+    </div>
     <div className="inbox-grid">{visible.map(i=><article className="card inbox-card" key={i.id}>
-      <h3>{i.title}</h3><blockquote>{i.original_text}</blockquote>
+      {i.title !== i.original_text.trim() && <h3>{i.title}</h3>}<blockquote>{i.original_text}</blockquote>
       {i.note&&<p className="inbox-note">备注：{i.note}</p>}
-      <p>{[i.topic,...(i.tags||[])].filter(Boolean).join(' · ')}</p>
+      {(i.topic || i.tags?.length > 0) && <p>{[i.topic,...(i.tags||[])].filter(Boolean).join(' · ')}</p>}
+      {i.radar_source && <p className="inbox-source">
+        {i.radar_source.label || i.source}
+        {i.radar_source.fetched_at && ` · 采集于 ${new Date(i.radar_source.fetched_at).toLocaleString('zh-CN')}`}
+        {/^https?:\/\//i.test(i.radar_source.url) && <> · <a href={i.radar_source.url} target="_blank" rel="noreferrer">查看原帖</a></>}
+      </p>}
       <div className="inbox-tags">{i.good_performance&&<span className="badge">表现好 · 用户标记</span>}{i.priority_reuse&&<span className="badge">重点复用</span>}{!i.persona&&<span className="badge">待选画像</span>}</div>
       {i.publish_url&&<a href={i.publish_url} target="_blank" rel="noreferrer">查看发布内容</a>}
       {i.review_note&&<p>复盘：{i.review_note}</p>}
@@ -94,5 +106,6 @@ export default function IdeasPage({persona, onOpenProject}: Props) {
       {error&&<p role="alert" className="inbox-error">{error}</p>}
       <div className="inbox-actions"><button className="btn" disabled={busy} onClick={()=>setEditing(null)}>取消</button><button className="btn btn-primary" disabled={busy} onClick={()=>act(async()=>{await updateIdea(editing.id,form);await load();setEditing(null);})}>保存整理信息</button></div>
     </section></div>}
+    </div>
   </div>;
 }

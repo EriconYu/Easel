@@ -158,6 +158,15 @@ class CodexAdapter:
             rpc.notify = original_notify
             for method, data in early:
                 notify(method, data)
+
+            async def steer(message: str):
+                if completion.done():
+                    raise HarnessError("当前回复已完成")
+                await rpc.call("turn/steer", {"threadId": thread_id, "expectedTurnId": turn_id,
+                                              "input": [{"type": "text", "text": message}]}, timeout=5)
+
+            if request.register_steer:
+                request.register_steer(steer)
             try:
                 await rpc.wait_notification(completion)
             except asyncio.CancelledError:
@@ -167,5 +176,7 @@ class CodexAdapter:
                     pass
                 raise
             finally:
+                if request.register_steer:
+                    request.register_steer(None)
                 if completion.done() and not completion.cancelled():
                     completion.exception()

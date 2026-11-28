@@ -57,6 +57,7 @@ function setup(responses = [automaticPolicy], draft = {}, deletedTasks = []) {
     '../lib/store': {
       loadPublishDraft: () => draft,
       recoverableLegacyPublishDraft: () => undefined,
+      listSavedPublishDrafts: () => [],
       removeDeletedProjectDrafts: (persona, ids) => {
         if (draft.project_source?.persona === persona && ids.includes(draft.project_source.task_id)) draft = {};
       },

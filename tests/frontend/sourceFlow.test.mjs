@@ -54,9 +54,9 @@ test('雷达推荐只打开项目：无讨论编辑、任务保存、预算或�
   assert.equal(calls[0].budget, 0);
   const pending = h.button('进入内容项目').props.onClick(); await tick();
   assert.equal(calls[1], 'saved-task');
-  assert.equal(h.render().find(n => n.type === 'fieldset').props.disabled, true);
+  assert.equal(h.button('进入内容项目').props.disabled, true);
   finish(); await pending; await tick();
-  assert.equal(h.render().find(n => n.type === 'fieldset').props.disabled, false);
+  assert.equal(h.button('进入内容项目').props.disabled, false);
   assert.doesNotMatch(read('WorkbenchPanel.tsx'), /WorkbenchDiscussion|saveWorkbenchTask|dismissWorkbench|onGenerateWorkbench|onContinueWorkbench/);
 });
 

@@ -252,7 +252,8 @@ export default function DashboardPage({ persona, gatewayStatus, apiDirect, agent
               {g.ok && g.items.length === 0 && <div className="dash-empty">采集成功，暂无热点</div>}
               {g.items.slice(0, 3).map((it, i) => (
                 <div key={i} className="dash-trend-item" title="到热点雷达查看来源">
-                  <button className="dash-more dash-trend-title" onClick={() => onNavigate('trends')}>{it.title}</button>
+                  {it.url ? <a className="dash-more dash-trend-title" href={it.url} target="_blank" rel="noreferrer">{it.title}</a>
+                    : <button className="dash-more dash-trend-title" onClick={() => onNavigate('trends')}>{it.title}</button>}
                 </div>
               ))}
             </div>
@@ -261,7 +262,7 @@ export default function DashboardPage({ persona, gatewayStatus, apiDirect, agent
 
         {/* 选题库 */}
         <ContentPanel className="dash-card" label="待整理灵感列表" header={<div className="dash-card-head">
-            <span><IconIdea size={16} /> 选题库 · {scope}</span>
+            <span><IconIdea size={16} /> 待整理灵感 · {scope}</span>
             <button className="dash-more" onClick={() => onNavigate('ideas')}>全部 →</button>
           </div>}>
           {pendingIdeas.length === 0 && <div className="dash-empty">{dataState.ideas === 'loading' ? '灵感加载中…' : dataState.ideas === 'error' ? '灵感加载失败，请刷新重试' : '暂无待整理灵感，可到灵感收件箱记录或整理素材'}</div>}

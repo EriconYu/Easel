@@ -65,9 +65,11 @@ interface OutputsPageProps {
   jumpPath?: string;
   jumpToken?: number;
   onJumpHandled?: () => void;
+  projectTaskIds?: string[];
+  onOpenProjectVersion?: (taskId: string, versionId: string) => void;
 }
 
-export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: OutputsPageProps) {
+export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled, projectTaskIds, onOpenProjectVersion }: OutputsPageProps) {
   const [roots, setRoots] = useState<OutputNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [treeReady, setTreeReady] = useState(false);
@@ -254,13 +256,17 @@ export default function OutputsPage({ jumpPath, jumpToken, onJumpHandled }: Outp
         {section('其他文件', documents)}
       </>}
     {selected && <FilePreview key={selected.path} file={selected} displayPath={readablePath(selected.path)}
+      onOpenProjectVersion={selected.version && selected.path.startsWith('主题-')
+        && projectTaskIds?.includes(selected.path.split('/')[0].slice(3)) ? onOpenProjectVersion : undefined}
       onClose={() => setSelected(null)} />}
     {deleting && <ContentDeleteDialog name={displayName(deleting)} kind={deleting.type === 'dir' ? '文件夹' : '文件'}
       path={deleting.path} onDeleted={finishRemoval} onClose={() => setDeleting(null)} />}
   </div>;
 }
 
-function FilePreview({ file, displayPath, onClose }: { file: OutputNode; displayPath: string; onClose: () => void }) {
+function FilePreview({ file, displayPath, onClose, onOpenProjectVersion }: {
+  file: OutputNode; displayPath: string; onClose: () => void; onOpenProjectVersion?: (taskId: string, versionId: string) => void;
+}) {
   const dialog = useRef<HTMLDialogElement>(null);
   const html = file.kind === 'text' && isHtml(file.name);
   const text = file.kind === 'text' && !html;
@@ -292,6 +298,11 @@ function FilePreview({ file, displayPath, onClose }: { file: OutputNode; display
           <p>{[fileType(file), versionInfo(file), itemTimestamp(file) && dateFormat.format(itemTimestamp(file))].filter(Boolean).join(' · ')}</p>
           <p title={displayPath}>{displayPath}</p></div>
         <div className="file-preview-actions">
+          {file.version && onOpenProjectVersion && <button type="button" className="btn btn-sm" onClick={() => {
+            if (!file.version) return;
+            onOpenProjectVersion(file.path.split('/')[0].slice(3), file.version.id);
+            onClose();
+          }}>回到项目版本</button>}
           {html && <a className="btn btn-sm" href={url} target="_blank" rel="noreferrer">新标签打开 ↗</a>}
           <a className="btn btn-sm" href={url} download={file.name}>下载</a>
           <button type="button" className="icon-btn" aria-label="关闭预览" autoFocus onClick={onClose}>×</button>

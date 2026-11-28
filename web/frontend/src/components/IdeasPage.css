@@ -1,1 +1,22 @@
 .inbox-capture {padding:16px;margin-bottom:18px}.inbox-capture textarea {min-height:110px;white-space:pre-wrap}.inbox-toolbar,.inbox-actions,.inbox-tags {display:flex;gap:8px;align-items:center;flex-wrap:wrap}.inbox-toolbar {margin:16px 0}.inbox-toolbar>.field {flex:1;min-width:220px}.inbox-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:14px}.inbox-card {padding:18px;min-width:0}.inbox-card h3 {margin:0 0 10px}.ideas-page blockquote {margin:12px 0;padding:10px 14px;border-left:3px solid var(--accent-start);background:var(--surface);white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto}.inbox-note {white-space:pre-wrap}.inbox-card .inbox-actions {margin-top:14px}.inbox-modal {width:800px;max-width:96vw;max-height:90vh;overflow-y:auto}.inbox-modal pre {white-space:pre-wrap;overflow-wrap:anywhere;max-height:340px;overflow:auto}.inbox-modal textarea {min-height:90px}.inbox-references,.inbox-versions {margin:18px 0;border:1px solid var(--border);border-radius:10px;padding:14px}.inbox-candidate {padding:10px 0;border-bottom:1px solid var(--border)}.inbox-error {padding:12px;color:var(--danger,#cf4545);border:1px solid currentColor;border-radius:8px}.inbox-modal small {overflow-wrap:anywhere}.inbox-actions select,.inbox-card select {max-width:100%;padding:7px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px}
+
+.ideas-page {
+  min-width: 0;
+  scrollbar-gutter: stable;
+  padding-inline: clamp(16px, 3vw, 32px);
+}
+.inbox-content { width: 100%; max-width: 1100px; margin-inline: auto; }
+.inbox-content .page-head { margin: 0 0 16px; }
+.inbox-capture { padding: clamp(14px, 2vw, 20px); }
+.inbox-capture textarea { display: block; resize: vertical; }
+.inbox-capture-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.inbox-toolbar { justify-content: space-between; gap: 12px; }
+.inbox-states { display: flex; flex-wrap: wrap; gap: 6px; }
+.inbox-states .chip span { font-variant-numeric: tabular-nums; }
+.inbox-toolbar > .field { flex: 1 1 240px; min-width: min(100%, 220px); max-width: 360px; }
+.inbox-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 310px), 1fr)); }
+.inbox-card h3, .inbox-note { overflow-wrap: anywhere; }
+.inbox-card blockquote { margin: 0 0 10px; }
+.inbox-source { margin: 8px 0; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.inbox-content > [role="status"], .inbox-content > .inbox-error { margin-bottom: 12px; }
+.inbox-content > .kanban-empty { padding: 24px 12px; border: 1px dashed var(--border); border-radius: var(--radius); }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { fetchSchedule, createSchedule, updateSchedule, deleteSchedule, fetchScheduleContext } from '../lib/api';
+import { fetchSchedule, createSchedule, updateSchedule, deleteSchedule, fetchScheduleContext, publicationUrl } from '../lib/api';
 import type { ScheduleItem, ScheduleInput, ScheduleContext } from '../lib/api';
 import { IconCalendar, IconTrash, IconChevron } from './icons';
 
@@ -40,6 +40,7 @@ export default function CalendarPage({ onOpenProject, onOpenDraft }: Props) {
   const [items, setItems] = useState<ScheduleItem[]>([]);
   const [editing, setEditing] = useState<ScheduleItem | null>(null);   // 现有项
   const [form, setForm] = useState<ScheduleInput | null>(null);        // 弹窗表单（null=关闭）
+  const [publicationConfirmed, setPublicationConfirmed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [filter, setFilter] = useState<Filter>('all');
   const [ctx, setCtx] = useState<ScheduleContext | null>(null);
@@ -82,9 +83,10 @@ export default function CalendarPage({ onOpenProject, onOpenDraft }: Props) {
     setProjectError('');
     setDayView(null);
     setEditing(null);
+    setPublicationConfirmed(false);
     setForm({ ...EMPTY, date, kind: filter === 'event' ? 'event' : 'content' });
   };
-  const openEdit = (it: ScheduleItem) => { setProjectError(''); setDayView(null); setEditing(it); setForm({ ...EMPTY, ...it }); };
+  const openEdit = (it: ScheduleItem) => { setProjectError(''); setDayView(null); setEditing(it); setPublicationConfirmed(false); setForm({ ...EMPTY, ...it }); };
   const close = () => { setForm(null); setEditing(null); };
 
   // 单条 chip（活动=色条，内容=按状态上色的圆点），日历格与当天详情共用
@@ -113,13 +115,21 @@ export default function CalendarPage({ onOpenProject, onOpenDraft }: Props) {
     );
   };
 
+  const newPublication = form?.kind !== 'event' && form?.status === 'published' && editing?.status !== 'published';
+  const editedPublicationLink = form?.status === 'published' && editing?.status === 'published' && (form.url || '') !== (editing.url || '');
+  const publicationReady = !newPublication && !editedPublicationLink ||
+    Boolean(publicationUrl(form?.url || '') && (!newPublication || publicationConfirmed));
   const save = async () => {
-    if (!form || !form.title.trim() || !form.date) return;
+    if (!form || !form.title.trim() || !form.date || !publicationReady) return;
     setSaving(true);
+    setProjectError('');
     try {
-      if (editing) await updateSchedule(editing.id, form);
-      else await createSchedule(form);
+      const record = newPublication || editedPublicationLink ? {...form, url: publicationUrl(form.url || '')} : form;
+      if (editing) await updateSchedule(editing.id, record);
+      else await createSchedule(record);
       close(); load();
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : '保存排期失败，请重试');
     } finally { setSaving(false); }
   };
   const remove = async () => {
@@ -324,12 +334,22 @@ export default function CalendarPage({ onOpenProject, onOpenDraft }: Props) {
                   ))}
                 </div>
                 <label className="field-label">状态</label>
-                <div style={{ display: 'flex', gap: 7 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
                   {Object.entries(STATUS_META).map(([k, m]) => (
                     <button key={k} className={`chip ${form.status === k ? 'active' : ''}`}
                       onClick={() => setForm({ ...form, status: k })}>{m.label}</button>
                   ))}
                 </div>
+                {form.status === 'published' && <>
+                  <label className="field-label">作品链接
+                    <input className="field" type="url" value={form.url || ''} placeholder="粘贴作品的 HTTPS 链接"
+                      onChange={event => setForm({...form, url: event.target.value})} />
+                  </label>
+                  {newPublication && <label className="cal-publication-confirm">
+                    <input type="checkbox" checked={publicationConfirmed} onChange={event => setPublicationConfirmed(event.target.checked)} />
+                    我已在官方平台发布这条作品
+                  </label>}
+                </>}
               </>
             )}
             <label className="field-label">备注</label>
@@ -341,7 +361,7 @@ export default function CalendarPage({ onOpenProject, onOpenDraft }: Props) {
                 : <span />}
               <div style={{ display: 'flex', gap: 8 }}>
                 <button className="btn btn-sm" onClick={close}>取消</button>
-                <button className="btn btn-sm btn-primary" onClick={save} disabled={saving || !form.title.trim() || !form.date}>
+                <button className="btn btn-sm btn-primary" onClick={save} disabled={saving || !form.title.trim() || !form.date || !publicationReady}>
                   {saving ? '保存中…' : '保存'}
                 </button>
               </div>

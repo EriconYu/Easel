@@ -37,6 +37,7 @@ class RunRequest:
     codex_auto_approve: bool = False
     web_search: bool | None = None
     output_schema: dict | None = None
+    register_steer: Callable[[Callable[[str], Awaitable[None]] | None], None] | None = None
 
 
 class Adapter(Protocol):

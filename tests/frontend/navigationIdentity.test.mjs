@@ -14,7 +14,7 @@ test('归档和删除当前会话时保留工作画像，不切已归档会话',
    setSessions:update=>{state.sessions=typeof update==='function'?update(state.sessions):update;},saveSessions:()=>{},
    setActiveSessionId:id=>{state.active=id;},setSelectedPersona:p=>{state.persona=p;},setCurrentPage:()=>{},
    createSession:()=>({id:'new',messages:[]}),streamCtl:{current:{}},streamAcc:{current:{}},clearStream:()=>{},stopChat:async()=>({}),
-   window:{confirm:()=>true},sessionStorage:{removeItem(){}},deleteRemoteSession:async()=>{}};
+   window:{confirm:()=>true},sessionStorage:{removeItem(){}},deleteRemoteSession:async()=>{},updateQueue:()=>{}};
   env.activateSession=callback('activateSession',env);
   await callback(name,env)('current',true);assert.equal(state.active,'general',name);assert.equal(state.persona,'甲',name);
  }

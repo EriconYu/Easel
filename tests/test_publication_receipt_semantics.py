@@ -18,13 +18,17 @@ def test_manual_publication_stamp_and_attribution_once(tmp_path, monkeypatch):
     body = dict(title='手工回填', date='2099-05-12', time='09:00', platform='知乎', status='scheduled')
     with TestClient(web.app, base_url='http://localhost:7860', headers={'Origin': 'http://localhost:7860'}) as client:
         plan = client.post('/api/schedule', json=body).json()
-        published = client.put('/api/schedule/' + plan['id'], json={**body, 'status': 'published'}).json()
+        missing_link = client.put('/api/schedule/' + plan['id'], json={**body, 'status': 'published'})
+        assert missing_link.status_code == 400
+        assert not forwarded
+        receipt = {**body, 'status': 'published', 'url': 'https://example.com/post'}
+        published = client.put('/api/schedule/' + plan['id'], json=receipt).json()
         assert published['date'] == body['date']
         assert published.get('publication_recorded_at'), published
         assert published['publication_recorded_at'][:10] != body['date']
         assert published['publication_status'] == 'published'
         assert len(forwarded) == 1
-        edited = client.put('/api/schedule/' + plan['id'], json={**body, 'status': 'published', 'note': '只改备注'}).json()
+        edited = client.put('/api/schedule/' + plan['id'], json={**receipt, 'note': '只改备注'}).json()
         assert edited['publication_recorded_at'] == published['publication_recorded_at']
         assert len(forwarded) == 1
         draft = client.post('/api/schedule', json={**body, 'title': '仅草稿', 'status': 'draft'}).json()
@@ -36,7 +40,8 @@ def test_created_published_record_is_stamped(tmp_path, monkeypatch):
     monkeypatch.setattr(web, 'SCHEDULE_FILE', tmp_path / '_schedule.json')
     forwarded = []
     monkeypatch.setattr(calendar_ops, '_forward_publish_log', lambda *a, **k: forwarded.append((a, k)))
-    req = web.ScheduleItem(title='直接手工确认已发', date='2099-05-12', platform='知乎', status='published')
+    req = web.ScheduleItem(title='直接手工确认已发', date='2099-05-12', platform='知乎',
+                           status='published', url='https://example.com/post')
     item = asyncio.run(web.api_schedule_create(req))
     assert item.get('publication_recorded_at')
     assert len(forwarded) == 1

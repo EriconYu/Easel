@@ -22,7 +22,7 @@ function setup() {
   const modules = {
     react: { Component: class {}, useState: () => [values[index++], () => {}], useEffect() {}, useCallback: fn => fn, useRef: value => ({ current: value }) },
     'react/jsx-runtime': { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) },
-    '../lib/api': { createIdea: data => { calls.push(data); return Promise.resolve(); } },
+    '../lib/api': { saveRadarIdea: (persona, data) => { calls.push({persona,data}); return Promise.resolve(); } },
     './icons': { IconFire: 'fire', IconRefresh: 'refresh', IconBookmark: 'bookmark', IconCheck: 'check', IconChat: 'chat' },
     './TrendSourcesDialog': { __esModule: true, default: 'dialog' },
     './ContentPanel': { __esModule: true, default: 'panel' },
@@ -57,7 +57,8 @@ test('热点操作保留完整来源，并分别触发收藏与工作台导入',
   assert.equal(app.topics[0].platform, group.platform);
   assert.equal(app.topics[0].label, group.label);
   assert.equal(app.calls.length, 1);
-  assert.equal(app.calls[0].title, title);
-  assert.equal(app.calls[0].source, '知乎');
-  assert.equal(app.calls[0].status, 'pending');
+  assert.equal(app.calls[0].persona, '测试');
+  assert.equal(app.calls[0].data.title, title);
+  assert.equal(app.calls[0].data.label, '知乎');
+  assert.equal(app.calls[0].data.url, item.url);
 });

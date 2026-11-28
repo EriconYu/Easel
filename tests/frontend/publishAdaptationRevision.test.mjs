@@ -101,7 +101,7 @@ test('空发布草稿自动载入一次，已有草稿可保留或明确替换',
 
   const buttons = () => renderHandoff({ hasDraft: true, onImport, onHandled }).filter(node => node.type === 'button');
   const [replace, keep] = buttons();
-  assert.equal(replace.props.children, '替换现有草稿');
+  assert.equal(replace.props.children, '保存当前并切换');
   assert.equal(keep.props.children, '保留当前草稿');
   keep.props.onClick();
   assert.deepEqual(imported, [sourceB]);

@@ -11,7 +11,9 @@ const ts = require('typescript');
 const componentPath = new URL('../../web/frontend/src/components/ContentWorkspace.tsx', import.meta.url);
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const task = {task_id:'a', title:'关系变化', status:'doing', note:'原备注', output_path:'outputs/a/',
-  card:{sources:[{platform:'热榜甲', url:'https://example.com/story', evidence:'原始线索'}], platforms:['公众号']}};
+  recommendation_context:{intent:'从关系中理解成熟'},
+  card:{source_title:'关系里的灰度', angle:'从一次分歧切入', platforms:['公众号'],
+    sources:[{platform:'热榜甲', url:'https://example.com/story', evidence:'原始线索', summary:'来源保留的摘要'}]}};
 const versions = [{id:'v1',name:'初稿',text:'**等风来的日子，也要把日子过好**\n\n第一稿真实文本',created_at:'2026-11-18'},
   {id:'v2',name:'修订稿',article_title:'第二稿文章标题',text:'第二稿真实文本',created_at:'2026-11-19'}];
 function harness(overrides = {}, initial = {}) {
@@ -73,7 +75,10 @@ test('唯一项目复用当前画像任务与原 DiscussionEditor，保留文件
   const generation=h.calls.find(c=>c[0]==='generate');
   assert.equal(generation[1].task_id,'a');assert.equal(generation[2],'口播');
   assert.deepEqual(Array.from(generation[3]),['公众号']);
-  assert.ok(h.render().some(n=>n.type==='a'&&n.props.href==='https://example.com/story'));
+  const references = h.input('选题参考');
+  assert.equal(references.type,'section');
+  assert.match(h.text(references),/从关系中理解成熟.*从一次分歧切入.*关系里的灰度.*来源保留的摘要/);
+  assert.ok(h.render().some(n=>n.type==='a'&&n.props.href==='https://example.com/story'&&h.text(n)==='关系里的灰度'));
   h.button('文件与素材').props.onClick();await h.flush();
   assert.ok(h.render().some(n=>n.type===h.outputs));
   assert.equal(h.render().filter(n=>n.props?.['aria-label']==='稿件文本').length,0);

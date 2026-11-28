@@ -9,7 +9,7 @@ import type { Page } from './Sidebar';
 import type { TaskInspiration } from '../lib/api';
 import InspirationPicker from './InspirationPicker';
 import ArticleTitleAssistant from './ArticleTitleAssistant';
-import { splitArticleHeading, withoutRepeatedArticleHeading } from '../lib/article';
+import { splitArticleHeading, splitDraftReply, withoutRepeatedArticleHeading } from '../lib/article';
 import { draftKey, loadEditorDraft, writeDraft, confirmDraftReplacement, editorDirty, briefFields, inspirationFields, type EditorDraft } from '../lib/editorDrafts';
 
 export interface WorkbenchDiscussionProps {
@@ -126,8 +126,8 @@ export function DiscussionEditor({ persona, taskId, onAction, discussionLabel = 
     if (last.status === 'running') { setNotice('对话尚未结束，请结束后再取回稿件。'); return; }
     if (last.status !== 'done' || last.clean_end === false || last.stop_reason === 'error') throw new Error('本轮生成失败，不能作为稿件取回；请修正模型配置或重试。');
     if (!last.text?.trim()) throw new Error('最近对话没有可取回的稿件。');
-    const body = last.text.match(/【正文开始】\s*([\s\S]*?)\s*【正文结束】/);
-    const article = splitArticleHeading(body ? body[1] : last.text);
+    const body = splitDraftReply(last.text)?.body;
+    const article = splitArticleHeading(body || last.text);
     updateDraft({text: article.body, articleTitle: article.title, savedArticleTitle: '',
       selectedVersion: '', sourceVersionId: '', sourceTurnId: last.turn_id || '', sourceKind: 'turn', savedText: '', savedName: ''});
     setNotice(body ? '已提取正文；内部依据仍保留在对话及引用快照中，请审核后另存版本。' : '未识别正文边界，已取回完整对话文本；请删除内部说明和路径后再用于发布。');

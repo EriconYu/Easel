@@ -3,21 +3,26 @@ import MessageBubble from './MessageBubble';
 import ArticleTitleAssistant from './ArticleTitleAssistant';
 import QuestionCards from './QuestionCards';
 import BrushEntry from './BrushEntry';
-import type { ChatSession, ChatMessage, StreamState } from '../lib/store';
+import type { ChatSession, ChatMessage, QueuedChatMessage, StreamState } from '../lib/store';
 import { uploadFiles, adoptOversize } from '../lib/api';
 import type { UploadedFile } from '../lib/api';
 import { IconArrowUp, IconStop, IconPlus, IconFile } from './icons';
 import { draftKey, readDraft, writeDraft } from '../lib/editorDrafts';
-import { splitArticleHeading } from '../lib/article';
+import { splitArticleHeading, splitDraftReply } from '../lib/article';
 
 interface ChatPageProps {
   projectTitle?: string;
+  projectSkills?: string[];
   onBackProject?: () => Promise<void>;
   onSaveReply: (reply: ChatMessage, index: number, title: string, text: string, articleTitle: string) => Promise<void>;
   apiDirect: boolean;
   session: ChatSession;
   stream?: StreamState;          // 进行中的流式态（来自 App，切页也不丢）
-  onSend: (displayText: string, attachments?: UploadedFile[]) => void;
+  queue?: {messages: QueuedChatMessage[]; paused?: boolean; intervening?: string; error?: string};
+  onRemoveQueued?: (id: string) => boolean;
+  onIntervene?: (id: string) => void;
+  onResumeQueue?: () => void;
+  onSend: (displayText: string, attachments?: UploadedFile[]) => boolean | void;
   onStop: () => void;
   onResend: (
     userIndex: number,
@@ -51,7 +56,7 @@ function SaveReplyDialog({message, projectTitle, persona, onSave, onClose}: {
   const saving = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const body = message.content.match(/【正文开始】\s*([\s\S]*?)\s*【正文结束】/)?.[1]?.trim();
+  const body = splitDraftReply(message.content)?.body;
   const article = splitArticleHeading(body || message.content.trim());
   const [text, setText] = useState(article.body);
   const [articleTitle, setArticleTitle] = useState(article.title);
@@ -108,7 +113,7 @@ function canSaveReply(message: ChatMessage) {
       !/(?:^|\n\n)Error: |_(?:（已停止）)_$|^上一轮任务记录已失效|^（无输出）$/u.test(text));
 }
 
-export default function ChatPage({ apiDirect, session, stream, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed, projectTitle, onBackProject, onSaveReply }: ChatPageProps) {
+export default function ChatPage({ apiDirect, session, stream, queue, onRemoveQueued, onIntervene, onResumeQueue, onSend, onStop, onResend, onQuestionAnswered, onQuestionClosed, projectTitle, projectSkills, onBackProject, onSaveReply }: ChatPageProps) {
   const [projectError, setProjectError] = useState('');
   const [saveReply, setSaveReply] = useState<{message: ChatMessage; index: number} | null>(null);
   const key = draftKey('chat', session.persona || '', session.id);
@@ -140,7 +145,7 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
   const isComposingRef = useRef(false);
 
   const isStreaming = !!stream;
-  const isEmpty = session.messages.length === 0 && !isStreaming;
+  const isEmpty = session.messages.length === 0 && !isStreaming && !queue?.messages.length;
 
   useEffect(() => {
     fetch('/api/upload/limits').then((r) => r.json())
@@ -200,11 +205,18 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
 
   const handleSend = () => {
     const trimmed = input.trim();
-    if ((!trimmed && attachments.length === 0) || isStreaming || uploading) return;
+    if ((!trimmed && attachments.length === 0) || uploading) return;
     // 附件通过结构化字段发送；用户消息气泡只显示用户实际输入的文字。
-    onSend(trimmed, attachments);
+    if (onSend(trimmed, attachments) === false) return;
     setInput('');
     setAttachments([]);
+  };
+
+  const editQueuedMessage = (message: QueuedChatMessage) => {
+    if (!onRemoveQueued?.(message.id)) return;
+    setInput([message.text, input].filter(Boolean).join('\n\n'));
+    setAttachments(current => [...new Map([...message.attachments, ...current].map(file => [file.id, file])).values()]);
+    textareaRef.current?.focus();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -254,15 +266,17 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
         onChange={(e) => { if (e.target.files) doUpload(e.target.files); e.target.value = ''; }} />
       <div className="composer-bar">
         <button className="composer-attach-btn" onClick={() => fileInputRef.current?.click()}
-          disabled={isStreaming || uploading} title={`添加素材（图片/文档）；超过 ${maxMb}MB 的大文件将自动存为本地素材（不走上传）`}>
+          disabled={uploading} title={`添加素材（图片/文档）；超过 ${maxMb}MB 的大文件将自动存为本地素材（不走上传）`}>
           <IconPlus size={15} /> {uploading ? '上传中…' : '素材'}
         </button>
-        <span className="composer-hint">{isStreaming ? '生成中…' : 'Enter 发送 · Shift+Enter 换行'}</span>
-        {isStreaming ? (
-          <button className="send-btn" onClick={onStop} title="停止生成"><IconStop size={15} /></button>
-        ) : (
-          <button className="send-btn" onClick={handleSend} disabled={(!input.trim() && !attachments.length) || uploading} title="发送"><IconArrowUp size={17} /></button>
-        )}
+        <span className="composer-hint">{isStreaming || queue?.messages.length ? 'Enter 加入队列 · Shift+Enter 换行' : 'Enter 发送 · Shift+Enter 换行'}</span>
+        <div className="composer-send-actions">
+          {isStreaming && <button className="send-btn" disabled={!!queue?.intervening} onClick={onStop} aria-label="停止生成" title="停止生成"><IconStop size={15} /></button>}
+          {(!isStreaming || input.trim() || attachments.length > 0) &&
+            <button className="send-btn" onClick={handleSend} disabled={(!input.trim() && !attachments.length) || uploading}
+              aria-label={isStreaming || queue?.messages.length ? '加入队列' : '发送'}
+              title={isStreaming || queue?.messages.length ? '加入队列' : '发送'}><IconArrowUp size={17} /></button>}
+        </div>
       </div>
     </div>
   );
@@ -270,6 +284,7 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
   const projectBar = <div className="workbench-meta" style={{padding:'8px 20px'}}>
     <div>此对话身份：{session.persona || '通用模式'} · 不随顶部工作画像切换。</div>
     {projectTitle ? <>内容项目：{projectTitle} <button onClick={() => { void onBackProject?.().catch(e => setProjectError(String(e.message || e))); }}>返回内容项目</button></> : '自由对话 · 选中满意的回复即可保存到内容库。'}
+    {projectTitle && !!projectSkills?.length && <div>项目技能 · {projectSkills.join('、')}</div>}
     {projectError && <p role="alert">{projectError}</p>}
   </div>;
   // ---- 空态：居中欢迎页 ----
@@ -318,9 +333,10 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
             const isLast = i === displayMessages.length - 1;
             const live = isStreaming && isLast && msg.role === 'assistant';
             const isFinal = !live && i < session.messages.length;
+            const draft = msg.role === 'assistant' && projectTitle ? splitDraftReply(msg.content, live) : null;
             let actions;
             if (isFinal) {
-              const copy = () => navigator.clipboard?.writeText(msg.content);
+              const copy = () => navigator.clipboard?.writeText(draft?.body || msg.content);
               // 只允许对「最后一轮」重试，契合 OpenClaw append-only 模型（不改写历史）；已移除编辑
               const isLastFinal = i === session.messages.length - 1;
               if (msg.role === 'user') {
@@ -348,13 +364,19 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
               <div key={`${i}-${msg.role}`}>
               <MessageBubble
                 key={`${i}-${msg.role}`}
-                message={msg}
+                message={draft ? {...msg, content: draft.body} : msg}
+                manuscriptNotes={draft?.notes}
                 isStreaming={live}
                 thinking={live ? stream!.thinking : ''}
                 activity={live ? stream!.activity : ''}
                 stillWorking={live ? stream!.stillWorking : ''}
                 actions={actions}
               />
+              {msg.interventions?.map((message, index) => <div key={index} className="chat-intervention">
+                <strong>生成中补充</strong>
+                {message.text && <p>{message.text}</p>}
+                {message.attachments.length > 0 && <p>{message.attachments.map(file => file.name).join('、')}</p>}
+              </div>)}
               {!live && msg.questions && <QuestionCards questions={msg.questions} onDone={onQuestionAnswered} onClosed={onQuestionClosed} />}
               </div>
             );
@@ -367,7 +389,29 @@ export default function ChatPage({ apiDirect, session, stream, onSend, onStop, o
       </div>
 
       <div className="chat-input-area">
-        <div className="chat-input-inner">{inputBox(false)}</div>
+        <div className="chat-input-inner">
+          {queue && queue.messages.length > 0 && <section className="chat-queue" aria-label="消息队列">
+            <header>
+              <strong>{queue.paused ? '队列已暂停' : '排队消息'} · {queue.messages.length}</strong>
+              {queue.paused && <button className="btn btn-sm" disabled={!!queue.intervening} onClick={onResumeQueue}>继续发送</button>}
+            </header>
+            {queue.error && <p role="alert">{queue.error}</p>}
+            <ol>{queue.messages.map(message => <li key={message.id}>
+              <div className="chat-queue-text">
+                {message.text && <p>{message.text}</p>}
+                {message.attachments.length > 0 && <small>{message.attachments.map(file => file.name).join('、')}</small>}
+              </div>
+              <div className="chat-queue-actions">
+                <button className="btn btn-sm" disabled={!!queue.intervening} onClick={() => onIntervene?.(message.id)}>
+                  {queue.intervening === message.id ? '干预中…' : isStreaming ? '立即干预' : '优先发送'}
+                </button>
+                <button className="btn btn-sm" disabled={queue.intervening === message.id} onClick={() => editQueuedMessage(message)}>撤回编辑</button>
+                <button className="btn btn-sm btn-ghost" disabled={queue.intervening === message.id} onClick={() => onRemoveQueued?.(message.id)}>删除</button>
+              </div>
+            </li>)}</ol>
+          </section>}
+          {inputBox(false)}
+        </div>
       </div>
     </div>
   );

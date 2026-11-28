@@ -20,6 +20,7 @@ interface MessageBubbleProps {
   activity?: string;
   stillWorking?: string;   // 防呆心跳提示（未卡住）；仅流式时的独立提示，不替代思考/活动
   actions?: BubbleActions;
+  manuscriptNotes?: string;
 }
 
 function ActionBar({ actions }: { actions: BubbleActions }) {
@@ -41,7 +42,7 @@ function ActionBar({ actions }: { actions: BubbleActions }) {
   );
 }
 
-export default function MessageBubble({ message, isStreaming, thinking, activity, stillWorking, actions }: MessageBubbleProps) {
+export default function MessageBubble({ message, isStreaming, thinking, activity, stillWorking, actions, manuscriptNotes }: MessageBubbleProps) {
   const rendered = useMemo(() => {
     if (message.role === 'user') return { html: '', artifacts: [], archives: [] };
     // 助手正文里裸露的产物路径先转成前端可用链接（文件直开、图片内联、目录跳内容库）。
@@ -121,6 +122,10 @@ export default function MessageBubble({ message, isStreaming, thinking, activity
         <div className="message-bubble assistant">
           {livePanel}
           {message.content && <div dangerouslySetInnerHTML={{ __html: rendered.html }} />}
+          {manuscriptNotes && <details className="thinking-block">
+            <summary>写作说明与依据</summary>
+            <div dangerouslySetInnerHTML={{__html: externalizeMediaLinks(renderMarkdown(linkifyOutputs(manuscriptNotes)))}} />
+          </details>}
           {!isStreaming && (rendered.artifacts.length > 0 || rendered.archives.length > 0) && (
             <ArtifactGallery artifacts={rendered.artifacts} archives={rendered.archives} />
           )}

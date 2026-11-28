@@ -35,6 +35,16 @@ def test_chinese_matching_exclusion_zero():
     assert all(c['evergreen'] for c in rec(exclude=['中年'])['cards'])
     r=rec([group('火箭发射')]);assert len(r['cards'])==1 and r['cards'][0]['evergreen'];assert '关系' in r['cards'][0]['title']
 
+
+def test_recommendation_ignores_incidental_words_in_long_intent():
+    intent = '紫微斗数，孤星，成熟，有容乃大，世界并不是非黑即白'
+    groups = [group('三角洲烽火世界杯瑞典开赛'), group('国产显卡是不是也要起来了？')]
+    result = rec(groups, intent=intent)
+    assert [card['title'] for card in result['cards']] == [intent]
+    assert result['cards'][0]['sources'] == []
+    group_with_match = group('紫微斗数的文化解读')
+    assert rec(groups + [group_with_match], intent=intent)['cards'][0]['title'] == '紫微斗数的文化解读'
+
 def test_partial_failure_merge_and_urls():
     r=rec([group(),group(platform='知乎'),{'ok':False,'platform':'抖音','error':{'message':'超时'}}])
     assert r['degraded'] and '超时' in r['failures'][0]

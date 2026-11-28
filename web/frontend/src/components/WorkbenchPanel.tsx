@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { fetchWorkbench, recommendWorkbench, analyzeWorkbench } from '../lib/api';
-import type { WorkbenchCard, WorkbenchResult } from '../lib/api';
+import { fetchWorkbench, recommendWorkbench, analyzeWorkbench, createIntentProject } from '../lib/api';
+import type { WorkbenchCard, WorkbenchInput, WorkbenchMethod, WorkbenchResult } from '../lib/api';
 import ContentPanel from './ContentPanel';
 import WorkbenchEngines from './WorkbenchEngines';
 import './WorkbenchPanel.css';
@@ -8,7 +8,7 @@ import './WorkbenchPanel.css';
 import { CREATION_PLATFORMS, platformNotice } from '../lib/platformCapabilities';
 const platforms = CREATION_PLATFORMS;
 function sourceLabel(card: WorkbenchCard) {
-  if (card.evergreen) return '常青方向（非热点）';
+  if (card.evergreen) return '自主选题';
   const kinds = new Set(card.sources.map(source => source.kind === 'search' || source.platform === '主动联网搜索' ? '联网搜索线索' : '热榜线索'));
   return [...kinds].join('＋') || '个人选题（无外部来源）';
 }
@@ -17,107 +17,164 @@ interface Props {
   onOpenProject: (taskId: string) => Promise<void>;
 }
 
+const methodLabels = {basic: '基础推荐', search: '联网补充', analysis: 'AI 分析'};
+const methods: WorkbenchMethod[] = ['basic', 'search', 'analysis'];
+type RecommendationOperation = 'load' | WorkbenchMethod;
+interface RadarState {
+  intent: string;
+  exclude: string;
+  platform: string;
+  days: WorkbenchInput['days'];
+  results: Partial<Record<WorkbenchMethod, WorkbenchResult>>;
+  view: WorkbenchMethod;
+  operation: RecommendationOperation | null;
+  error: string;
+}
+
+// Radar navigation unmounts its panel. Keep the form and request together for each persona.
+const radarStates = new Map<string, {state: RadarState; listeners: Set<(state: RadarState) => void>}>();
+
 export default function WorkbenchPanel({ persona, onOpenProject }: Props) {
-  const [intent, setIntent] = useState('');
-  const [exclude, setExclude] = useState('');
-  const [platform, setPlatform] = useState('通用');
-  const [days, setDays] = useState<1 | 3 | 7>(3);
-  const [result, setResult] = useState<WorkbenchResult | null>(null);
-  const [operation, setOperation] = useState<'load' | 'recommend' | 'search' | 'analyze' | 'open' | null>('load');
-  const loading = operation !== null;
-  const [error, setError] = useState('');
+  const initial: RadarState = {intent: '', exclude: '', platform: '通用', days: 3, results: {}, view: 'basic', operation: 'load', error: ''};
+  const [state, setState] = useState(radarStates.get(persona)?.state || initial);
+  const {intent, exclude, platform, days, results, view, operation, error} = state;
+  const result = results[view];
+  const availableMethods = methods.filter(method => results[method]);
   const [searchReady, setSearchReady] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [projectError, setProjectError] = useState('');
+
+  const update = (patch: Partial<RadarState>) => {
+    const entry = radarStates.get(persona);
+    if (!entry) return;
+    entry.state = {...entry.state, ...patch};
+    entry.listeners.forEach(listener => listener(entry.state));
+  };
 
   useEffect(() => {
-    let active = true;
-    setResult(null);
-    setError('');
-    setIntent('');
-    setExclude('');
-    setOperation('load');
-    if (!persona) { setOperation(null); return () => { active = false; }; }
-    fetchWorkbench(persona).then(data => {
-      if (!active) return;
-      setResult(data.recommendations);
-      setIntent(data.recommendations.intent || '');
-      setExclude((data.recommendations.exclude || []).join('，'));
-      setPlatform(data.recommendations.platforms?.[0] || '通用');
-      setDays(data.recommendations.days || 3);
-    }).catch(e => { if (active) setError(String(e.message || e)); })
-      .finally(() => { if (active) setOperation(null); });
-    return () => { active = false; };
+    if (!persona) return;
+    let entry = radarStates.get(persona);
+    if (!entry) {
+      entry = {state: initial, listeners: new Set()};
+      radarStates.set(persona, entry);
+      void fetchWorkbench(persona).then(({recommendations, recommendation_sets}) => {
+        const method = recommendations.method ||
+          (recommendations.analyzed_at ? 'analysis' : recommendations.include_search ? 'search' : 'basic');
+        const groups = recommendation_sets ?? {[method]: recommendations};
+        update({results: groups, view: groups[method] ? method : methods.find(key => groups[key]) || method,
+          intent: recommendations.intent || '',
+          exclude: (recommendations.exclude || []).join('，'),
+          platform: recommendations.platforms?.[0] || '通用', days: recommendations.days || 3});
+      }).catch(e => update({error: e instanceof Error ? e.message : '读取推荐失败'}))
+        .finally(() => update({operation: null}));
+    }
+    entry.listeners.add(setState);
+    setState(entry.state);
+    return () => { entry.listeners.delete(setState); };
   }, [persona]);
 
-  const run = async (fn: () => Promise<void>, kind: 'recommend' | 'search' | 'analyze' | 'open') => {
-    setOperation(kind);
-    setError('');
-    try { await fn(); }
-    catch (e) { setError(e instanceof Error ? e.message : '操作失败'); }
-    finally { setOperation(null); }
+  const input = (includeSearch = false): WorkbenchInput => ({persona, intent: intent.trim(),
+    exclude: exclude.split(/[,，]/).map(word => word.trim()).filter(Boolean), budget: 0,
+    platforms: [platform], days, include_search: includeSearch});
+  const run = async (kind: WorkbenchMethod, request: () => Promise<WorkbenchResult>) => {
+    const entry = radarStates.get(persona);
+    if (!entry || entry.state.operation) return;
+    update({operation: kind, error: ''});
+    try {
+      const result = await request();
+      update({results: {...entry.state.results, [kind]: result}, view: kind});
+    }
+    catch (e) { update({error: e instanceof Error ? e.message : '操作失败'}); }
+    finally { update({operation: null}); }
   };
-  const recommend = (includeSearch: boolean) => run(async () => {
-    setResult(await recommendWorkbench({persona, intent, exclude: exclude.split(/[,，]/).map(s => s.trim()).filter(Boolean), budget: 0, platforms: [platform], days, include_search: includeSearch}));
-  }, includeSearch ? 'search' : 'recommend');
+  const recommend = (includeSearch: boolean) => run(includeSearch ? 'search' : 'basic',
+    () => recommendWorkbench(input(includeSearch)));
+  const open = async (taskId?: string) => {
+    if (opening) return;
+    setOpening(true);
+    setProjectError('');
+    try {
+      const id = taskId || (await createIntentProject(input())).task_id;
+      await onOpenProject(id);
+    } catch (e) {
+      setProjectError(e instanceof Error ? e.message : '打开内容项目失败');
+    } finally { setOpening(false); }
+  };
+  const busy = operation !== null;
+  const shownInput = input();
+  const differentInput = !!result?.intent && (result.intent !== shownInput.intent ||
+    (result.exclude || []).join('，') !== shownInput.exclude.join('，') ||
+    (result.platforms?.[0] || '通用') !== platform || (result.days || 3) !== days);
 
-  return <ContentPanel className="dash-card dash-card-wide workbench-panel" label="画像选题推荐" header={<div>今日意愿与推荐</div>}>
-    <div className="workbench-intro"><p>仅手动更新：打开页面读取上次保存的推荐，不会自动调用AI。热榜按来源缓存按需刷新，不等于定时生成选题。每次最多展示5条，不足不凑数。</p><p>上次推荐保存：{result?.updated_at || '尚无记录'}；上次AI分析：{result?.analyzed_at || '未分析或旧记录未记时间'}。</p></div>
+  return <ContentPanel className="dash-card dash-card-wide workbench-panel" label="画像选题推荐" header={<div>选题与创作</div>}>
     {!persona ? <div className="workbench-empty" role="status">
       <strong>请先选择画像</strong><span>选择画像后才能获取推荐并进入内容项目。</span>
-    </div> : <fieldset className="workbench-content" disabled={loading}>
+    </div> : <div className="workbench-content">
       <section className="workbench-input">
-        <div className="workbench-section-head"><div><h3>今天想做什么</h3><p>描述目标，选择来源时间范围和搜索方式。</p></div></div>
+        <div className="workbench-section-head"><h3>今天想做什么</h3></div>
         <div className="workbench-fields">
-          <label>今日意愿<input aria-label="今日意愿" value={intent} maxLength={500} onChange={e => setIntent(e.target.value)} placeholder="例如：关系中的付出、事业选择" /></label>
-          <label>排除主题<input value={exclude} onChange={e => setExclude(e.target.value)} placeholder="逗号分隔，例如：争议、广告" /></label>
-          <label>目标平台<select aria-label="目标平台" value={platform} onChange={e => setPlatform(e.target.value)}>
+          <label className="workbench-intent-field">今日意愿<textarea aria-label="今日意愿" value={intent} rows={3} disabled={operation === 'load'} maxLength={500} onChange={e => update({intent: e.target.value})}
+            placeholder="写下你想讲的主题、观点或场景，例如：成熟是不是意味着能容纳关系里的灰度？" /></label>
+          <label>排除主题<input value={exclude} disabled={operation === 'load'} onChange={e => update({exclude: e.target.value})} placeholder="逗号分隔，例如：争议、广告" /></label>
+          <label>目标平台<select aria-label="目标平台" value={platform} disabled={operation === 'load'} onChange={e => update({platform: e.target.value})}>
             {platforms.map(p => <option key={p}>{p}</option>)}
           </select></label>
-          <label>来源时间<select aria-label="来源时间" value={days} onChange={e => setDays(Number(e.target.value) as 1 | 3 | 7)}>
+          <label>来源时间<select aria-label="来源时间" value={days} disabled={operation === 'load'} onChange={e => update({days: Number(e.target.value) as WorkbenchInput['days']})}>
             {[1, 3, 7].map(n => <option key={n} value={n}>最近{n}天</option>)}
           </select></label>
         </div>
         {platformNotice(platform) && <p className="workbench-muted" role="note">{platformNotice(platform)}</p>}
-        <WorkbenchEngines readOnly={true} onSearchReady={setSearchReady} />
-        <p className="workbench-muted">① 基础推荐：热榜＋规则匹配，不调用AI。② 联网补充：主动搜索后重新匹配。③ AI分析：模型分析现有候选，不自动生成文章。讨论、依据与稿件统一在内容项目中处理。</p>
-        <div className="workbench-actions">
-          <button onClick={() => recommend(false)}>{operation === 'recommend' ? '生成推荐中…' : '生成基础推荐'}</button>
-          <button disabled={!searchReady} onClick={() => recommend(true)}>{operation === 'search' ? '联网检索中…' : '联网补充推荐'}</button>
-          <button disabled={!result?.cards.length} onClick={() => run(async () => {
-            const analyzed = await analyzeWorkbench(persona);
-            setResult(analyzed);
-          }, 'analyze')}>{operation === 'analyze' ? 'AI分析中…' : 'AI分析选题'}</button>
+        <div className="workbench-actions workbench-start-actions">
+          <button disabled={opening || !intent.trim()} onClick={() => open()}>{opening ? '正在打开内容项目…' : '用今日意愿直接创作'}</button>
         </div>
-        {loading && <p role="status" aria-live="polite" className="workbench-status">{operation === 'recommend'
+        <div className="workbench-options">
+          <p className="workbench-muted">想先找角度？可以用 AI 分析，或查找相关线索。</p>
+          <div className="workbench-actions workbench-option-actions">
+            <button type="button" className="btn btn-sm" disabled={busy || !intent.trim()} onClick={() => run('analysis',
+              () => analyzeWorkbench(persona, input()))}>{operation === 'analysis' ? 'AI分析中…' : 'AI分析选题'}</button>
+            <button type="button" className="btn btn-sm" disabled={busy || !intent.trim()} onClick={() => recommend(false)}>{operation === 'basic' ? '生成推荐中…' : '生成基础推荐'}</button>
+            <button type="button" className="btn btn-sm" disabled={busy || !searchReady || !intent.trim()} onClick={() => recommend(true)}>{operation === 'search' ? '联网检索中…' : '联网补充推荐'}</button>
+          </div>
+          <WorkbenchEngines readOnly={true} onSearchReady={setSearchReady} />
+        </div>
+        {busy && <p role="status" aria-live="polite" className="workbench-status">{operation === 'basic'
           ? '正在生成推荐：读取热榜、按画像和今日意愿进行规则匹配，不调用AI，完成后保存。'
           : operation === 'search' ? '正在主动联网检索并补充推荐，完成后保存；不生成正文。'
-          : operation === 'analyze' ? '正在进行AI选题分析，完成后更新推荐；失败会保留现有结果。'
-          : operation === 'load' ? '正在加载推荐…' : '正在打开内容项目…'}</p>}
+          : operation === 'analysis' ? '正在进行AI选题分析，完成后显示分析结果。'
+          : '正在加载推荐…'}</p>}
         {error && <p role="alert" className="workbench-error">{error}</p>}
       </section>
       <section className="workbench-recommendations">
-        <div className="workbench-section-head"><div><h3>推荐卡</h3><p>{result?.ranking || '规则推荐'} · 搜索范围最近{result?.days || days}天，热榜原文日期仍需核验。AI 分析期间显示现有推荐，失败时保留规则结果。</p></div></div>
+        <div className="workbench-section-head"><div><h3>选题建议</h3>
+          {result?.ranking && <p>{differentInput ? `上一次意愿 · ${result.intent}` : result.ranking}</p>}</div></div>
+        {availableMethods.length > 1 && <div className="workbench-result-views" role="group" aria-label="选题结果">
+          {availableMethods.map(method => <button key={method} type="button" className="btn btn-sm"
+            aria-pressed={view === method} onClick={() => update({view: method})}>{methodLabels[method]}</button>)}
+        </div>}
         {result?.failures?.map((failure, i) => <p className="workbench-notice" key={i}>来源失败：{failure}</p>)}
         {result?.pending_sources?.length ? <p className="workbench-notice" role="status">来源仍在采集中：{result.pending_sources.join('、')}。这不是采集失败，完成后可重新生成推荐。</p> : null}
         {result?.search_warnings?.map((warning, i) => <p className="workbench-notice" key={`search-${i}`}>搜索说明：{warning}</p>)}
-        {!result?.cards?.length && <p className="workbench-muted">暂无推荐，先填写今日意愿并生成。</p>}
+        {!result?.cards?.length && <p className="workbench-muted">有合适的选题建议时会显示在这里。</p>}
+        {projectError && <p role="alert" className="workbench-error">{projectError}</p>}
         <div className="workbench-card-grid">{result?.cards.slice(0, 5).map(card => <article className="workbench-recommendation" key={card.task_id}>
           <div className="workbench-card-title"><h4>{card.title}</h4><span>{sourceLabel(card)}</span></div>
-          <p className="workbench-meta">处理方式：{card.analysis_evidence ? '已由AI分析' : '规则匹配，未做AI分析'}{card.analysis_engine ? ` · ${card.analysis_engine.runtime} / ${card.analysis_engine.model || '底座默认模型'}` : ''}{card.analyzed_at ? ` · 分析时间：${card.analyzed_at}` : ''}</p>
+          <p className="workbench-meta">{card.analysis_evidence ? '已由 AI 分析' : card.evergreen ? '按今日意愿创作' : '意愿匹配'}{card.analysis_engine ? ` · ${card.analysis_engine.runtime} / ${card.analysis_engine.model || '底座默认模型'}` : ''}{card.analyzed_at ? ` · 分析时间：${card.analyzed_at}` : ''}</p>
           {card.source_title && <p className="workbench-meta">线索原题：{card.source_title}</p>}
-          <p>{card.relevance_reason}</p><p>{card.angle}</p>
-          <p className="workbench-risk">风险与边界：{card.risk}</p>
-          <p className="workbench-meta">适配：{card.platforms.join('、')}</p>
-          {card.sources.length === 0 ? <p className="workbench-source-empty">无新闻来源，不代表今日热点。</p> : <div className="workbench-sources">
+          <p>{card.angle}</p>
+          <p className="workbench-meta">{card.relevance_reason}</p>
+          <div className="workbench-actions">
+            <button disabled={opening} onClick={() => open(card.task_id)}>进入内容项目</button>
+          </div>
+          {(card.risk || card.sources.length > 0) && <details className="workbench-sources">
+            <summary>{card.sources.length ? '来源与注意事项' : '创作注意事项'}</summary>
+            {card.risk && <p>{card.risk}</p>}
             {card.sources.map((source, i) => <p key={i}>
-              {source.provider || source.platform} · 类型：{source.kind === 'search' || source.platform === '主动联网搜索' ? '联网搜索' : '热榜'} · 发布时间：{source.published_at || '缺失'} · 采集时间：{source.fetched_at || '缺失'} · {source.evidence}{' '}
+              {source.provider || source.platform} · {source.published_at || '日期待核验'} · {source.evidence}{' '}
               {/^https?:\/\//i.test(source.url) && <a href={source.url} target="_blank" rel="noreferrer">查看来源</a>}
             </p>)}
-          </div>}
-          <div className="workbench-actions">
-            <button onClick={() => run(async () => { await onOpenProject(card.task_id); }, 'open')}>进入内容项目</button>
-          </div>
+          </details>}
         </article>)}</div>
       </section>
-    </fieldset>}
+    </div>}
   </ContentPanel>;
 }

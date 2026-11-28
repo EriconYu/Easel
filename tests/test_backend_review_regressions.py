@@ -76,7 +76,7 @@ def test_calendar_publisher_preserves_corrupt_store(tmp_path, monkeypatch, bad):
 
 def schedule_web(path):
     scope = web_functions('_schedule_lock', '_read_schedule', '_write_schedule', '_detach_schedule_project',
-                         'ScheduledDraftContent', 'ScheduleItem', '_annotate_manual_draft',
+                         'ScheduledDraftContent', 'ScheduleItem', '_annotate_manual_draft', '_validate_calendar_publication',
                          'api_schedule_create', 'api_schedule_update',
                          SCHEDULE_FILE=path, OUTPUTS_DIR=path.parent,
                          _SCHEDULE_LOCK=threading.Lock(),

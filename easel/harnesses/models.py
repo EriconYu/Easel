@@ -54,6 +54,19 @@ async def available_models(runtime: str, request: RunRequest) -> list[dict]:
                 if not following or following == cursor:
                     break
                 cursor = following
+            # The catalog may omit models explicitly configured for a custom provider.
+            try:
+                settings = await rpc.call("config/read", {
+                    "cwd": str(request.cwd), "includeLayers": False}, timeout=3)
+            except HarnessError:
+                settings = None
+            config = settings.get("config") if isinstance(settings, dict) else None
+            configured = config.get("model") if isinstance(config, dict) else None
+            if _valid_id(configured):
+                for item in models:
+                    item["default"] = item["id"] == configured
+                if not any(item["id"] == configured for item in models):
+                    models.insert(0, {"id": configured, "label": configured, "default": True})
     elif runtime == "opencode":
         env = {**request.env, "EASEL_ROOT": str(request.cwd.resolve()),
                "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}

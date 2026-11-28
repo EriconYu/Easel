@@ -1,4 +1,5 @@
 import { parsePersonas } from './personas';
+import type { RadarSource } from './radar';
 
 function getBasePath(): string {
   const path = window.location.pathname;
@@ -18,19 +19,21 @@ export class ApiError extends Error {
   }
 }
 
-export interface WorkbenchSource { kind?:'trend'|'search'; provider?:string; platform:string; url:string; published_at:string|null; fetched_at:string|null; evidence:string }
-export interface WorkbenchCard { task_id:string; title:string; source_title?:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes?:number; analysis_evidence?:string; analysis_engine?:{runtime:string;model:string}|null; analyzed_at?:string; platforms:string[]; evergreen:boolean }
+export interface WorkbenchSource { kind?:'trend'|'search'; provider?:string; platform:string; url:string; published_at:string|null; fetched_at:string|null; evidence:string; summary?:string }
+export interface WorkbenchCard { task_id:string; title:string; source_title?:string; sources:WorkbenchSource[]; relevance_reason:string; angle:string; risk:string; estimated_minutes?:number; analysis_evidence?:string; analysis_engine?:{runtime:string;model:string}|null; analyzed_at?:string; platforms:string[]; evergreen:boolean; origin?:string }
 export type WorkbenchFormat = '讨论'|'母稿'|'口播'|'平台稿';
-export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string; source?:'chat'; updated_at?:string }
-export interface WorkbenchResult { updated_at?:string; analyzed_at?:string; cards:WorkbenchCard[]; failures:string[]; pending_sources?:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
+export interface WorkbenchTask { task_id:string; title:string; status:'todo'|'doing'|'done'|'blocked'; note?:string; output_path:string; publish_url?:string; session_id?:string; source?:'chat'; updated_at?:string; recommendation_context?:{intent?:string} }
+export type WorkbenchMethod = 'basic' | 'search' | 'analysis';
+export interface WorkbenchResult { method?:WorkbenchMethod; updated_at?:string; analyzed_at?:string; cards:WorkbenchCard[]; failures:string[]; pending_sources?:string[]; degraded:boolean; intent?:string; exclude?:string[]; budget?:number; platforms?:string[]; days?:1|3|7; include_search?:boolean; ranking?:string; search_warnings?:string[] }
 export interface WorkbenchInput { persona:string; intent:string; exclude:string[]; budget:number; platforms:string[]; days:1|3|7; include_search:boolean }
 const wbPost = <T,>(path:string, body:unknown):Promise<T> => request(`/api/workbench/${path}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
 const workbenchScope = (persona: string) => encodeURIComponent(persona || '_general');
-export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;tasks:WorkbenchTask[];deleted_tasks?:string[]}>{return request(`/api/workbench/${workbenchScope(persona)}`)}
+export function fetchWorkbench(persona:string):Promise<{recommendations:WorkbenchResult;recommendation_sets?:Partial<Record<WorkbenchMethod, WorkbenchResult>>;tasks:WorkbenchTask[];deleted_tasks?:string[]}>{return request(`/api/workbench/${workbenchScope(persona)}`)}
 export interface WorkbenchEngines { search:{provider:string;providers:{id:string;label:string;configured:boolean}[];key_configured:boolean}; analysis:{runtime:string;model:string;label:string} }
 export function fetchWorkbenchEngines():Promise<WorkbenchEngines>{return request('/api/workbench/engines')}
 export function saveWorkbenchSearchSettings(body:{provider:string;api_key?:string;clear_key?:boolean}):Promise<WorkbenchEngines['search']>{return wbPost('search-settings',body)}
 export function recommendWorkbench(body:WorkbenchInput):Promise<WorkbenchResult>{return wbPost('recommend',body)}
+export function createIntentProject(input: WorkbenchInput): Promise<WorkbenchTask> { return wbPost('intent-project', input); }
 export function saveWorkbenchTask(persona:string,task:Partial<WorkbenchTask>&{task_id:string}):Promise<WorkbenchTask>{return wbPost('task',{persona,task})}
 export function dismissWorkbench(persona:string,task_id:string):Promise<{ok:boolean}>{return wbPost('feedback',{persona,task_id})}
 export function contextWorkbench(persona:string,task_id:string,format:WorkbenchFormat,platforms:string[]):Promise<{context:string}>{return wbPost('context',{persona,task_id,format,platforms})}
@@ -48,6 +51,7 @@ export interface WorkbenchBrief {
   reference_title: string;
   reference_text: string;
   evidence?: WorkbenchEvidence[];
+  skills?: WorkbenchEvidence[];
 }
 export interface WorkbenchSkill { id: string; title: string; description: string; source: string }
 export interface WorkbenchDocument { id: string; title: string; type: string; source: string; available: boolean; reason?: string }
@@ -60,7 +64,9 @@ export interface WorkbenchVersion {
   provenance?: {kind: 'version' | 'turn' | 'unverified_turn' | 'manual_declared'; source_version_id?: string; source_turn_id?: string; context_id?: string; context_mode?: string};
   declared_brief?: WorkbenchBrief;
 }
-export function analyzeWorkbench(persona: string): Promise<WorkbenchResult> { return wbPost('analyze', {persona}); }
+export function analyzeWorkbench(persona: string, input?: WorkbenchInput): Promise<WorkbenchResult> {
+  return wbPost('analyze', {persona, input});
+}
 export function fetchWorkbenchSkills(): Promise<{items: WorkbenchSkill[]}> { return request('/api/workbench/catalog/skills'); }
 export function fetchWorkbenchDocuments(): Promise<{items: WorkbenchDocument[]}> { return request('/api/workbench/catalog/documents'); }
 export function fetchWorkbenchBrief(persona: string, taskId: string): Promise<WorkbenchBrief> {
@@ -383,7 +389,7 @@ export interface ScheduleItem {
   persona?: string;      // 关联工作台内容项目；旧自由日历不要求填写
   task_id?: string;
   version_id?: string;
-  draft_content?: { body: string; tags: string; media: string[]; persona: string; theme?: string };
+  draft_content?: { body: string; tags: string; media: string[]; persona: string; theme?: string; script?: string };
   publication_status?: string;
   platform_draft_source?: string;
 }
@@ -413,6 +419,13 @@ export function updateSchedule(id: string, item: ScheduleInput): Promise<Schedul
 }
 export function canonicalPlatform(name: string = ''): string {
   return ({'微信公众号':'公众号','微信视频号':'视频号','推特 X':'X'} as Record<string,string>)[name] || name;
+}
+export function publicationUrl(value: string) {
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol === 'https:' && !url.username && !url.password) return url.href;
+  } catch { /* invalid URL */ }
+  return '';
 }
 export async function savePublishSchedule(input: ScheduleInput & {platform_draft_confirmed?: boolean}, scheduleId?: string): Promise<ScheduleItem> {
   const records = await fetchSchedule();
@@ -453,8 +466,14 @@ export interface Idea {
   original_text: string; persona: string; topic: string; tags: string[];
   good_performance: boolean; priority_reuse: boolean; publish_url: string; review_note: string;
   developments: Record<string, {task_id: string; session_id: string}>;
+  radar_source?: RadarSource;
 }
-export type IdeaInput = Partial<Omit<Idea, 'id' | 'created' | 'developments'>>;
+export type IdeaInput = Partial<Omit<Idea, 'id' | 'created' | 'developments' | 'radar_source'>>;
+export function saveRadarIdea(persona: string, source: RadarSource): Promise<Idea> {
+  return request('/api/ideas/radar', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({persona, source}),
+  });
+}
 export interface IdeaReference { idea_id: string; version_id?: string }
 export function fetchIdeas(filters: {q?: string; persona?: string; exclude?: string; good_only?: boolean} = {}): Promise<Idea[]> {
   const params = new URLSearchParams();
@@ -881,6 +900,15 @@ export function stopChat(sessionId: string): Promise<{ stopped: boolean }> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId }),
+  });
+}
+
+export function steerChat(sessionId: string, turnId: string, message: string,
+  attachments: UploadedFile[]): Promise<{action: 'steered' | 'interrupted' | 'next'}> {
+  return request('/api/chat/steer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({sessionId, turnId, message, attachments}),
   });
 }
 

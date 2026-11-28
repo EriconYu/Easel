@@ -1,4 +1,4 @@
-import { contextWorkbench, fetchWorkbench, saveWorkbenchTask, type WorkbenchCard, type WorkbenchFormat, type WorkbenchTask } from './lib/api';
+import { contextWorkbench, fetchWorkbench, fetchWorkbenchBrief, saveWorkbenchTask, type WorkbenchCard, type WorkbenchFormat, type WorkbenchTask } from './lib/api';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Sidebar from './components/Sidebar';
 import type { Page } from './components/Sidebar';
@@ -13,11 +13,12 @@ import CalendarPage from './components/CalendarPage';
 import IdeasPage from './components/IdeasPage';
 import PublishPage from './components/PublishingPage';
 import type { ProjectPublishDraft } from './components/PublishingPage';
+import { removeProjectEditorDraft } from './lib/editorDrafts';
 import BreakdownPage from './components/BreakdownPage';
 import SubNav from './components/SubNav';
 import OnboardingWizard from './components/OnboardingWizard';
 import SettingsPanel from './components/SettingsPanel';
-import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat, saveChatVersion, fetchWorkbenchVersions } from './lib/api';
+import { fetchStatus, fetchPersonas, streamChat, fetchLastTurn, stopChat, steerChat, saveChatVersion, fetchWorkbenchVersions } from './lib/api';
 import type { PersonaItem, UploadedFile, ChatQuestion, ScheduleItem } from './lib/api';
 import { availablePersona, parsePersonas, loadWorkingPersona, saveWorkingPersona } from './lib/personas';
 import { questionStatus } from './lib/api';
@@ -31,10 +32,28 @@ import {
   saveActiveId,
   removeDeletedProjectDrafts,
 } from './lib/store';
-import type { ChatSession, ChatMessage, StreamState } from './lib/store';
+import type { ChatSession, ChatMessage, QueuedChatMessage, StreamState } from './lib/store';
 import { splitArticleHeading, withoutRepeatedArticleHeading } from './lib/article';
 
 const ONBOARDING_SEEN_KEY = 'easel_onboarding_seen';
+const CHAT_QUEUES_KEY = 'easel_chat_queues';
+
+interface ChatQueue {
+  messages: QueuedChatMessage[];
+  paused?: boolean;
+  allowIncomplete?: boolean;
+  priorityId?: string;
+  intervening?: string;
+  error?: string;
+}
+
+function loadChatQueues(): Record<string, ChatQueue> {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(CHAT_QUEUES_KEY) || '{}') as Record<string, ChatQueue>;
+    return Object.fromEntries(Object.entries(saved).filter(([, queue]) => Array.isArray(queue?.messages))
+      .map(([id, queue]) => [id, {...queue, intervening: undefined}]));
+  } catch { return {}; }
+}
 
 function onboardingSeen(): boolean {
   const current = localStorage.getItem(ONBOARDING_SEEN_KEY);
@@ -87,10 +106,11 @@ export default function App() {
   const [showRecommend, setShowRecommend] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [projectFocus, setProjectFocus] = useState<{persona:string;taskId:string;versionId?:string} | null>(null);
+  const [projectFocus, setProjectFocus] = useState<{persona:string;taskId:string;versionId?:string;edit?:boolean} | null>(null);
   const projectId = projectFocus?.persona === selectedPersona ? projectFocus.taskId : '';
   const [projectDraft, setProjectDraft] = useState<ProjectPublishDraft | undefined>();
-  const [chatLink, setChatLink] = useState<{sessionId: string; task: WorkbenchTask | null} | null>(null);
+  const [radarView, setRadarView] = useState<'persona' | 'raw'>('persona');
+  const [chatLink, setChatLink] = useState<{sessionId: string; task: WorkbenchTask | null; skills?: string[]} | null>(null);
   // 装完还没配模型时，首开要把用户直接带到模型设置页（安装脚本不再在终端问 Key）
   const [needModelSetup, setNeedModelSetup] = useState(false);
   const [sessionSaveError, setSessionSaveError] = useState(false);
@@ -255,8 +275,15 @@ export default function App() {
   useEffect(() => {
     let alive = true;
     if (currentPage === 'chat' && activeSessionId) {
-      fetchWorkbench(activeSession?.persona || '').then(data => {
-        if (alive) setChatLink({sessionId: activeSessionId, task: data.tasks.find(t => t.session_id === activeSessionId) || null});
+      const persona = activeSession?.persona || '';
+      fetchWorkbench(persona).then(async data => {
+        if (!alive) return;
+        const task = data.tasks.find(t => t.session_id === activeSessionId) || null;
+        setChatLink({sessionId: activeSessionId, task});
+        if (task) {
+          const brief = await fetchWorkbenchBrief(persona, task.task_id);
+          if (alive) setChatLink({sessionId: activeSessionId, task, skills: brief.skills?.map(skill => skill.title)});
+        }
       }).catch(() => {});
     }
     return () => { alive = false; };
@@ -272,8 +299,19 @@ export default function App() {
 
   // ---- 流式对话：状态与生命周期都放在 App（永不卸载），切页/切 ChatPage 都不中断/丢失 ----
   const [streams, setStreams] = useState<Record<string, StreamState>>({});
+  const [chatQueues, setChatQueues] = useState(loadChatQueues);
+  const queuesRef = useRef(chatQueues);
+  const updateQueue = useCallback((sessionId: string, change: (queue: ChatQueue) => ChatQueue) => {
+    const updated = {...queuesRef.current};
+    const queue = change(updated[sessionId] || {messages: []});
+    if (queue.messages.length || queue.intervening) updated[sessionId] = queue;
+    else delete updated[sessionId];
+    queuesRef.current = updated;
+    setChatQueues(updated);
+    try { sessionStorage.setItem(CHAT_QUEUES_KEY, JSON.stringify(updated)); } catch { /* keep in the tab */ }
+  }, []);
   const streamCtl = useRef<Record<string, AbortController>>({});
-  const streamAcc = useRef<Record<string, { content: string; thinking: string; steps: string[]; questions: ChatQuestion[] }>>({});
+  const streamAcc = useRef<Record<string, { content: string; thinking: string; steps: string[]; questions: ChatQuestion[]; turnId?: string }>>({});
   const finalizers = useRef(new Map<string, { owner: object; finish: () => void; timer?: ReturnType<typeof setTimeout> }>());
   const answeredRef = useRef<Set<string>>(new Set());   // 已提交答案的 question id：重放/恢复不再重现
   // ---- 打字机：分批到达的 token 按节奏吐给界面 ----
@@ -421,7 +459,7 @@ export default function App() {
       const next = prev.map((s) => (s.id === sessionId ? { ...s, pendingTurnId: turnId } : s));
       saveSessions(next); return next;
     });
-    const owner = { content: '', thinking: '', steps: [] as string[], questions: [] as ChatQuestion[] };
+    const owner = { content: '', thinking: '', steps: [] as string[], questions: [] as ChatQuestion[], turnId };
     streamAcc.current[sessionId] = owner;
     setStreams((prev) => ({ ...prev, [sessionId]: { content: '', thinking: '', activity: '', questions: [] } }));
     // 打字机队列：流式事件按批到达（OpenClaw 攒批），前端按字符节奏显示，体验逐字浮现。
@@ -485,7 +523,7 @@ export default function App() {
     if (!last || last.role !== 'user') return;   // 没有悬空的用户消息 = 无需恢复
     let turnId = s.pendingTurnId;
     try { turnId = sessionStorage.getItem(`easel_pending_turn:${sessionId}`) || turnId; } catch { /* use persisted id */ }
-    const owner = { content: '', thinking: '', steps: [] as string[], questions: [] as ChatQuestion[] };
+    const owner = { content: '', thinking: '', steps: [] as string[], questions: [] as ChatQuestion[], turnId };
     streamAcc.current[sessionId] = owner;
     setStreams((p) => ({ ...p, [sessionId]: { content: '', thinking: '', activity: '⏳ 正在接回上一轮结果…', questions: [] } }));
     typingBuf.current[sessionId] = '';
@@ -574,9 +612,9 @@ export default function App() {
   ) => {
     const visible = displayText.trim();
     const agentMessage = (legacyAgentText || displayText).trim();
-    if ((!agentMessage && attachments.length === 0) || streamCtl.current[sessionId] || streamAcc.current[sessionId]) return;
+    if ((!agentMessage && attachments.length === 0) || streamCtl.current[sessionId] || streamAcc.current[sessionId]) return false;
     const cur = sessionsRef.current.find((s) => s.id === sessionId);
-    if (!cur) return; // 不存在的会话不是通用会话，不可借用全局画像发送。
+    if (!cur) return false; // 不存在的会话不是通用会话，不可借用全局画像发送。
     const persona = availablePersona(cur.persona ?? '', personasLoaded ? personas : null) || undefined;
     setSessions((prev) => {
       const next = prev.map((s) => {
@@ -598,11 +636,90 @@ export default function App() {
       return next;
     });
     startStream(sessionId, agentMessage, persona, attachments);
+    return true;
   }, [selectedPersona, startStream, personas, personasLoaded]);
 
-  const handleSendMessage = useCallback((sessionId: string, displayText: string, attachments?: UploadedFile[]) => {
-    sendUserAndStream(sessionId, displayText, attachments);
-  }, [sendUserAndStream]);
+  const handleSendMessage = useCallback((sessionId: string, text: string, attachments: UploadedFile[] = []) => {
+    if (!text.trim() && !attachments.length) return false;
+    const queue = queuesRef.current[sessionId];
+    if (!streamAcc.current[sessionId] && !streamCtl.current[sessionId] && !queue?.messages.length) {
+      return sendUserAndStream(sessionId, text, attachments);
+    }
+    const message = {id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, text, attachments};
+    updateQueue(sessionId, current => ({...current, messages: [...current.messages, message]}));
+    return true;
+  }, [sendUserAndStream, updateQueue]);
+
+  useEffect(() => {
+    for (const session of sessions) {
+      const queue = queuesRef.current[session.id];
+      if (!queue?.messages.length || queue.paused || queue.intervening || session.pendingTurnId ||
+          streamAcc.current[session.id] || streamCtl.current[session.id]) continue;
+      const previous = session.messages.at(-1);
+      if (previous?.incomplete && !queue.allowIncomplete) {
+        updateQueue(session.id, current => ({...current, paused: true}));
+        continue;
+      }
+      const message = queue.messages[0];
+      const original = queue.priorityId === message.id
+        ? [...session.messages].reverse().find(entry => entry.role === 'user') : undefined;
+      const prompt = original && previous?.incomplete
+        ? `上一条请求：\n${original.content}\n\n请按这个补充调整后继续：\n${message.text}`
+        : undefined;
+      const attachments = original && previous?.incomplete
+        ? [...new Map([...(original.attachments || []), ...message.attachments].map(file => [file.id, file])).values()]
+        : message.attachments;
+      if (sendUserAndStream(session.id, message.text, attachments, prompt)) {
+        updateQueue(session.id, current => ({...current, messages: current.messages.slice(1),
+          error: undefined, allowIncomplete: false, priorityId: undefined}));
+      }
+    }
+  }, [chatQueues, sessions, streams, sendUserAndStream, updateQueue]);
+
+  const removeQueuedMessage = (sessionId: string, id: string) => {
+    const message = queuesRef.current[sessionId]?.messages.find(item => item.id === id);
+    if (!message || queuesRef.current[sessionId]?.intervening === id) return false;
+    updateQueue(sessionId, queue => ({...queue, messages: queue.messages.filter(item => item.id !== id), error: undefined}));
+    return true;
+  };
+
+  const interveneWithQueuedMessage = async (sessionId: string, id: string) => {
+    const queue = queuesRef.current[sessionId];
+    const message = queue?.messages.find(item => item.id === id);
+    if (!message || queue?.intervening) return;
+    const turnId = streamAcc.current[sessionId]?.turnId;
+    if (!turnId && streamAcc.current[sessionId]) {
+      updateQueue(sessionId, current => ({...current, error: '正在恢复上一轮，请稍后重试。'}));
+      return;
+    }
+    updateQueue(sessionId, current => ({...current, intervening: id, error: undefined}));
+    try {
+      const action = turnId ? (await steerChat(sessionId, turnId, message.text, message.attachments)).action : 'next';
+      if (action === 'steered') {
+        setSessions(previous => {
+          const next = previous.map(session => {
+            if (session.id !== sessionId) return session;
+            const source = [...session.messages].reverse().find(entry => entry.role === 'user');
+            return {...session, messages: session.messages.map(entry => entry === source
+              ? {...source, interventions: [...(source.interventions || []), {text: message.text, attachments: message.attachments}]}
+              : entry)};
+          });
+          saveSessions(next);
+          return next;
+        });
+      }
+      updateQueue(sessionId, current => {
+        if (current.intervening !== id) return current;
+        const remaining = current.messages.filter(item => item.id !== id);
+        return action === 'steered' ? {...current, messages: remaining, intervening: undefined} :
+          {...current, messages: [message, ...remaining], intervening: undefined, paused: false,
+            allowIncomplete: true, priorityId: action === 'interrupted' ? id : undefined};
+      });
+    } catch (error) {
+      updateQueue(sessionId, current => current.intervening === id ? {...current, intervening: undefined,
+        paused: true, error: error instanceof Error ? error.message : '干预失败，消息仍在队列。'} : current);
+    }
+  };
 
   // 重试/编辑重发：从该用户消息处截断（丢弃它及其之后），用 text 重新发起。
   const handleResend = useCallback((
@@ -615,10 +732,10 @@ export default function App() {
     sendUserAndStream(sessionId, displayText, attachments, legacyAgentText, userIndex);
   }, [sendUserAndStream]);
 
-  const handleOpenProject = useCallback(async (taskId: string) => {
+  const handleOpenProject = useCallback(async (taskId: string, edit = false) => {
     await saveWorkbenchTask(selectedPersona, {task_id: taskId});
     setOutputsJump('');
-    setProjectFocus({persona: selectedPersona, taskId});
+    setProjectFocus({persona: selectedPersona, taskId, edit});
     setCurrentPage('outputs');
   }, [selectedPersona]);
 
@@ -653,11 +770,15 @@ export default function App() {
     const sourceTitle = version?.article_title ?? (version && splitArticleHeading(version.text).title);
     const title = sourceTitle && (item.title === project?.title || item.title === '未填写文章标题')
       ? sourceTitle : item.title;
+    const spoken = item.draft_content?.script !== undefined || version?.format === '口播';
+    const text = withoutRepeatedArticleHeading(sourceText, title);
+    const legacySpoken = spoken && item.draft_content?.script === undefined;
     setSelectedPersona(persona);
     setProjectDraft({
       persona, task_id: item.task_id || '', version_id: item.version_id || '',
       versionName: version?.name || '日历稿件', title,
-      text: withoutRepeatedArticleHeading(sourceText, title), platform: item.platform,
+      text: legacySpoken ? '' : text, platform: item.platform,
+      script: item.draft_content?.script ?? (spoken ? text : undefined),
       scheduleId: item.id, tags: item.draft_content?.tags, media: item.draft_content?.media,
       theme: item.draft_content?.theme,
     });
@@ -712,7 +833,7 @@ export default function App() {
     if (pending) { pending.finish(); return; }
     streamCtl.current[sessionId]?.abort();
     // 告诉后端**真正终止**这一轮 agent 并释放会话锁——否则后端进程还在跑、占着锁，下一句会被拦
-    void stopChat(sessionId).catch(() => { /* 后端可能已结束，忽略 */ });
+    const stopped = stopChat(sessionId).catch(() => { /* 后端可能已结束，忽略 */ });
     flushTyping(sessionId);   // 停止时立刻把队列余字吐完，保证已到内容不丢
     const a = streamAcc.current[sessionId];
     if (a && (a.content || a.thinking || a.steps.length)) {
@@ -733,6 +854,7 @@ export default function App() {
       return next;
     });
     try { sessionStorage.removeItem(`easel_pending_turn:${sessionId}`); } catch { /* ignore */ }
+    return stopped;
   }, [appendAssistant, clearStream]);
 
   const handleSessionRename = useCallback((id: string, title: string) => {
@@ -792,6 +914,7 @@ export default function App() {
     if (!window.confirm('确定删除这条对话？')) return;
 
     const target = sessionsRef.current.find((s) => s.id === id);
+    updateQueue(id, () => ({messages: []}));
     const wasRunning = Boolean(streamCtl.current[id]);
     const stopped = wasRunning
       ? stopChat(id).catch(() => ({ stopped: false }))
@@ -823,7 +946,7 @@ export default function App() {
       }
       return updated;
     });
-  }, [activeSessionId, clearStream, activateSession]);
+  }, [activeSessionId, clearStream, activateSession, updateQueue]);
 
   // 首次引导：跳过（用通用模式）
   const dismissRecommend = useCallback(() => {
@@ -873,7 +996,7 @@ export default function App() {
             gatewayStatus={gatewayStatus}
             apiDirect={apiDirect}
             agentRuntime={agentRuntime}
-            onNavigate={setCurrentPage}
+            onNavigate={page => { if (page === 'trends') setRadarView('raw'); setCurrentPage(page); }}
             onOpenProject={handleOpenProject}
             onOpenOutput={path => { setOutputsJump(path); setCurrentPage('outputs'); }}
           />
@@ -882,14 +1005,25 @@ export default function App() {
         return activeSession ? (
           <ChatPage
             projectTitle={chatProject?.title}
+            projectSkills={chatLink?.sessionId === activeSession.id ? chatLink.skills : undefined}
             onBackProject={chatProject ? () => handleOpenLinkedProject(activeSession.persona || '', chatProject.task_id) : undefined}
             onSaveReply={(reply, index, title, text, articleTitle) => handleSaveChatReply(activeSession, reply, index, title, text, articleTitle)}
             apiDirect={apiDirect}
             key={`${activeSession.persona || ''}:${activeSession.id}`}
             session={activeSession}
             stream={streams[activeSession.id]}
+            queue={chatQueues[activeSession.id]}
+            onRemoveQueued={id => removeQueuedMessage(activeSession.id, id)}
+            onIntervene={id => void interveneWithQueuedMessage(activeSession.id, id)}
+            onResumeQueue={() => updateQueue(activeSession.id, queue => ({...queue, paused: false, error: undefined, allowIncomplete: true}))}
             onSend={(displayText, attachments) => handleSendMessage(activeSession.id, displayText, attachments)}
-            onStop={() => handleStopStream(activeSession.id)}
+            onStop={() => {
+              const id = activeSession.id;
+              if (!queuesRef.current[id]?.messages.length) { void handleStopStream(id); return; }
+              updateQueue(id, queue => ({...queue, paused: true, intervening: 'stop'}));
+              void Promise.resolve(handleStopStream(id)).finally(() => updateQueue(id, queue =>
+                queue.intervening === 'stop' ? {...queue, intervening: undefined} : queue));
+            }}
             onResend={(userIndex, displayText, attachments, legacyAgentText) => handleResend(
               activeSession.id, userIndex, displayText, attachments, legacyAgentText,
             )}
@@ -915,8 +1049,8 @@ export default function App() {
           />
         ) : null;
       case 'trends':
-        return <TrendsPage persona={selectedPersona} onNavigate={setCurrentPage}
-          onOpenProject={handleOpenProject} />;
+        return <TrendsPage persona={selectedPersona} onNavigate={setCurrentPage} initialView={radarView}
+          onViewChange={setRadarView} onOpenProject={taskId => handleOpenProject(taskId, true)} />;
       case 'ideas':
         return <IdeasPage persona={selectedPersona} onOpenProject={handleOpenProject} />;
       case 'calendar':
@@ -932,10 +1066,13 @@ export default function App() {
         return <ContentWorkspace persona={selectedPersona} projectId={projectId} onOpenProject={handleOpenProject}
           onProjectDeleted={taskId => {
             removeDeletedProjectDrafts(selectedPersona, [taskId]);
+            removeProjectEditorDraft(selectedPersona, taskId);
             setProjectFocus(current => current?.persona === selectedPersona && current.taskId === taskId ? null : current);
             setProjectDraft(current => current?.persona === selectedPersona && current.task_id === taskId ? undefined : current);
           }}
           openedVersionId={projectId ? projectFocus?.versionId : undefined} onOpenProjectChat={handleOpenProjectChat}
+          focusEditor={!!projectId && projectFocus?.edit}
+          onOpenProjectVersion={(taskId, versionId) => handleOpenLinkedProject(selectedPersona, taskId, versionId)}
           onGenerateWorkbench={handleGenerateWorkbench} onNavigate={setCurrentPage}
           jumpPath={outputsJump} onJumpHandled={clearOutputsJump}
           onPreparePublish={draft => { setProjectDraft(draft); setCurrentPage('publish'); }} />;

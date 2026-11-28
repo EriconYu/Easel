@@ -5,7 +5,7 @@ import uuid
 from . import workbench as w
 
 
-def import_source(persona, source):
+def normalize_source(source):
     if not isinstance(source, dict) or set(source) - {'id', 'title', 'url', 'platform', 'label', 'published_at', 'fetched_at', 'hot'}:
         raise ValueError('无效来源字段')
     raw = {}
@@ -14,6 +14,15 @@ def import_source(persona, source):
     if not raw['title'] or not raw['platform']:
         raise ValueError('来源标题和平台不能为空')
     raw['url'] = w.safe_url(source.get('url'))
+    return raw
+
+
+def source_identity(source):
+    return (source['platform'], source.get('id') or source.get('url') or source['title'])
+
+
+def import_source(persona, source):
+    raw = normalize_source(source)
     identity = hashlib.sha256(json.dumps([raw['platform'], raw['id'], raw['title'], raw['url']], ensure_ascii=False).encode()).hexdigest()
     with w._LOCK:
         data = w._read(persona)

@@ -42,6 +42,14 @@ def test_actual_turn_uses_context_snapshot_not_save_time_brief(project):
     assert saved['provenance']['context_id']
 
 
+def test_saved_explicit_oral_turn_is_classified_for_publishing(project):
+    message = w.generation_context('甲', project, '口播', ['抖音'])
+    evidence.capture_turn('甲', 'session-test', 'oral-turn', message)
+    evidence.finish_turn('甲', 'session-test', 'oral-turn', 'completed')
+    version = evidence.save_chat_reply('甲', 'session-test', 'oral-turn', '项目', '录制用正文', turn_id='oral-turn')['version']
+    assert version['format'] == '口播' and version['platform'] == '抖音'
+
+
 def test_follow_up_turn_inherits_known_history_not_new_brief(project):
     message = w.generation_context('甲', project, '母稿', ['公众号'])
     evidence.capture_turn('甲', 'session-test', 'turn-first', message)

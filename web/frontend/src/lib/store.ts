@@ -10,6 +10,13 @@ export interface ChatMessage {
   questions?: ChatQuestion[];
   turnId?: string;
   incomplete?: boolean;
+  interventions?: Pick<QueuedChatMessage, 'text' | 'attachments'>[];
+}
+
+export interface QueuedChatMessage {
+  id: string;
+  text: string;
+  attachments: UploadedFile[];
 }
 
 export interface ChatSession {
@@ -45,6 +52,7 @@ export interface PublishDraft {
   theme?: string;
   media?: string[];
   schedule?: { id: string; platform: string };
+  script?: string;
 }
 const PUBLISH_KEY = 'easel_publish_draft';
 const PREVIOUS_BRAND = ['post', 'craft'].join('');
@@ -65,6 +73,12 @@ const PUBLISH_DEFAULT: PublishDraft = {
   title: '', body: '', platforms: ['xiaohongshu', 'douyin'], overrides: {}, tags: '',
 };
 const publishKey = (persona: string) => `${PUBLISH_KEY}:persona:${JSON.stringify(persona)}`;
+const savedPublishPrefix = (persona: string) => `${PUBLISH_KEY}:saved:${JSON.stringify(persona)}:`;
+function savedPublishKey(draft: Pick<PublishDraft, 'project_source' | 'schedule'>, persona: string) {
+  const identity = draft.schedule ? ['calendar', draft.schedule.id]
+    : draft.project_source ? ['project', draft.project_source.task_id, draft.project_source.version_id] : ['unlinked'];
+  return savedPublishPrefix(persona) + JSON.stringify(identity);
+}
 const emptyPublishDraft = (): PublishDraft => ({ ...PUBLISH_DEFAULT, platforms: [...PUBLISH_DEFAULT.platforms], overrides: {} });
 export function loadPublishDraft(persona = ''): PublishDraft {
   try {
@@ -81,34 +95,94 @@ export function loadPublishDraft(persona = ''): PublishDraft {
         }
       }
     }
-    if (!raw) return emptyPublishDraft();
+    return parsePublishDraft(raw, persona) ?? emptyPublishDraft();
+  } catch {
+    return emptyPublishDraft();
+  }
+}
+
+function parsePublishDraft(raw: string | null, persona: string): PublishDraft | undefined {
+  if (!raw) return;
+  try {
     const value = JSON.parse(raw) as PublishDraft;
     if (!value || typeof value.title !== 'string' || typeof value.body !== 'string'
       || !Array.isArray(value.platforms) || value.platforms.some(p => typeof p !== 'string')
       || !value.overrides || typeof value.overrides !== 'object' || Array.isArray(value.overrides)
       || Object.values(value.overrides).some(text => typeof text !== 'string')
-      || (value.project_source && value.project_source.persona !== persona)) return emptyPublishDraft();
+      || (value.project_source && value.project_source.persona !== persona)) return;
     return { title: value.title, body: value.body, platforms: value.platforms, overrides: value.overrides,
       articleTitleSet: value.articleTitleSet === true ? true : undefined,
       platformTitles: value.platformTitles && typeof value.platformTitles === 'object' && !Array.isArray(value.platformTitles)
         ? Object.fromEntries(Object.entries(value.platformTitles).filter(([, title]) => typeof title === 'string')) : undefined,
       tags: typeof value.tags === 'string' ? value.tags : '', project_source: value.project_source,
       theme: typeof value.theme === 'string' ? value.theme : undefined,
+      script: typeof value.script === 'string' ? value.script : undefined,
       media: Array.isArray(value.media) ? value.media.filter(path => typeof path === 'string') : undefined,
       schedule: typeof value.schedule?.id === 'string' && typeof value.schedule.platform === 'string' ? value.schedule : undefined };
   } catch {
-    return emptyPublishDraft();
+    return;
   }
 }
-export function savePublishDraft(d: PublishDraft, persona = ''): void {
-  if (d.project_source && d.project_source.persona !== persona) return;
-  try { localStorage.setItem(publishKey(persona), JSON.stringify(d)); } catch { /* quota */ }
+
+function hasPublishContent(draft: PublishDraft) {
+  return Boolean(draft.title.trim() || draft.body.trim() || draft.tags.trim() || draft.script?.trim() || draft.media?.length
+    || Object.values(draft.overrides).some(value => value.trim())
+    || Object.values(draft.platformTitles || {}).some(value => value.trim()));
+}
+
+export function savePublishDraft(draft: PublishDraft, persona = ''): boolean {
+  if (draft.project_source && draft.project_source.persona !== persona) return false;
+  try {
+    const serialized = JSON.stringify(draft);
+    const key = savedPublishKey(draft, persona);
+    if (hasPublishContent(draft) && localStorage.getItem(key) !== serialized) localStorage.setItem(key, serialized);
+    localStorage.setItem(publishKey(persona), serialized);
+    return true;
+  } catch {
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('easel-editor-save-error'));
+    return false;
+  }
+}
+
+export function listSavedPublishDrafts(persona: string) {
+  const drafts: {key: string; draft: PublishDraft}[] = [];
+  try {
+    const prefix = savedPublishPrefix(persona);
+    const active = savedPublishKey(loadPublishDraft(persona), persona);
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (!key?.startsWith(prefix) || key === active) continue;
+      const draft = parsePublishDraft(localStorage.getItem(key), persona);
+      if (draft) drafts.push({key, draft});
+    }
+  } catch { /* storage unavailable */ }
+  return drafts.sort((left, right) => left.draft.title.localeCompare(right.draft.title, 'zh-CN'));
+}
+
+export function readSavedPublishDraft(persona: string, project_source: PublishDraft['project_source'],
+  schedule: PublishDraft['schedule']) {
+  if (!project_source && !schedule) return;
+  try {
+    return parsePublishDraft(localStorage.getItem(savedPublishKey({project_source, schedule}, persona)), persona);
+  } catch { return; }
+}
+
+export function removeCurrentSavedPublishDraft(persona: string) {
+  try { localStorage.removeItem(savedPublishKey(loadPublishDraft(persona), persona)); }
+  catch { /* storage unavailable */ }
 }
 
 export function removeDeletedProjectDrafts(persona: string, taskIds: string[]): void {
   if (!taskIds.length) return;
   const archiveKey = `${PUBLISH_KEY}:legacy-recovered`;
-  for (const key of [publishKey(persona), PUBLISH_KEY, `${PREVIOUS_BRAND}_publish_draft`, archiveKey]) {
+  const keys = [publishKey(persona), PUBLISH_KEY, `${PREVIOUS_BRAND}_publish_draft`, archiveKey];
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(savedPublishPrefix(persona))) keys.push(key);
+    }
+  } catch { /* storage unavailable */ }
+  for (const key of keys) {
     try {
       const raw = localStorage.getItem(key);
       if (!raw) continue;

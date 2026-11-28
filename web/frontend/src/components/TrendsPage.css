@@ -1,8 +1,41 @@
-/* Keep source discussion discoverable without hover, including touch screens. */
+.trends-page { min-width: 0; scrollbar-gutter: stable; }
+.radar-content { width: 100%; max-width: 1100px; margin-inline: auto; }
+.radar-content .page-head { margin: 0; }
+.radar-views {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.radar-views .subnav-tab.active { background: var(--accent-end); color: #fff; }
+.radar-description { margin: 12px 0; font-size: 13px; color: var(--text-secondary); }
+.radar-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; }
+.radar-toolbar .trend-source-controls { flex: 1 1 360px; flex-wrap: wrap; padding: 0; overflow: visible; }
+.radar-toolbar .trend-actions { margin-inline-start: auto; flex-wrap: wrap; }
+.radar-updated { font-size: 12px; color: var(--text-secondary); }
+.radar-content .trend-grid { margin: 14px 0 0; }
+.radar-content .workbench-panel { padding: clamp(12px, 2vw, 18px); }
+.radar-content .workbench-panel > .content-panel-body { max-height: none; overflow: visible; }
+.radar-content .workbench-card-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); }
+.radar-content .workbench-fields { grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); }
+.radar-content .workbench-fields > label { min-width: 0; }
+
+/* Keep both article actions visible, including on touch screens. */
 .raw-trends-panel .trend-item {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr);
-  gap: 6px 10px;
+  align-items: start;
+  gap: 5px 8px;
+}
+.raw-trends-panel .trend-item + .trend-item { border-top: 1px solid var(--border); }
+.raw-trends-panel .trend-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .raw-trends-panel .trend-item-actions {
   grid-column: 2;
@@ -17,6 +50,7 @@
 .raw-trends-panel .trend-use {
   gap: 5px;
   padding: 5px 9px;
+  font-size: 12px;
   color: var(--accent-end);
 }
 .raw-trends-panel .trend-use:disabled {

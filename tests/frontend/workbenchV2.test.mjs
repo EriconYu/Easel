@@ -87,7 +87,27 @@ test('推荐等待时按钮旁显示具体步骤，完成后恢复操作', async
   assert.ok(status>=0 && status<nodes.findIndex(n=>n.props?.children==='关系变化'));
   finish(recommendation);await tick();
   assert.ok(h.button('生成基础推荐'));
-  assert.equal(h.render().find(n=>n.type==='fieldset').props.disabled,false);
+  assert.equal(h.button('生成基础推荐').props.disabled,false);
+});
+test('没有候选时分析使用当前意愿，分析中可以直接创作', async()=>{
+  const calls=[];
+  let finish;
+  const h=harness('components/WorkbenchPanel.tsx', {
+    fetchWorkbench:async()=>({recommendations:{...recommendation,cards:[]},tasks:[]}),
+    analyzeWorkbench:(persona,input)=>{calls.push(input);return new Promise(resolve=>{finish=resolve;});},
+    createIntentProject:async input=>{calls.push(input);return {task_id:'direct-project'};},
+  }, {persona:'甲',onOpenProject:async id=>calls.push(id)});
+  h.render();h.effects[0]();await tick();
+  h.input('今日意愿').props.onChange({target:{value:'成熟与关系里的灰度'}});
+  h.button('AI分析选题').props.onClick();
+  await tick();
+  assert.equal(calls[0].intent,'成熟与关系里的灰度');
+  assert.ok(h.button('AI分析中…'));
+  assert.equal(h.button('用今日意愿直接创作').props.disabled,false);
+  await h.button('用今日意愿直接创作').props.onClick();
+  assert.equal(calls[1].intent,'成熟与关系里的灰度');
+  assert.equal(calls[2],'direct-project');
+  finish(recommendation);await tick();
 });
 test('热榜推荐与联网搜索显式分开，AI失败保留规则结果', async()=>{
   const calls=[];

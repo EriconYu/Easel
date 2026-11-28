@@ -66,6 +66,9 @@ while True:
             reply(message, {"data": [{"model": "first-model", "displayName": "First", "isDefault": True},
                                     {"model": "hidden-model", "hidden": True},
                                     {"model": "bad\nmodel"}], "nextCursor": "next"})
+    elif method == "config/read" and mode in ("custom-model", "catalog-model"):
+        configured = "gpt-6.2-sol" if mode == "custom-model" else "second-model"
+        reply(message, {"config": {"model": configured}})
     elif method in ("thread/start", "thread/resume"):
         if mode == "stable-resume" and method == "thread/resume":
             thread_id = message["params"]["threadId"]
@@ -77,6 +80,8 @@ while True:
                         "configOptions": [{"category": "model", "id": "model", "type": "select"}]})
     elif method == "session/set_config_option":
         reply(message, {})
+    elif method == "turn/steer":
+        reply(message, {"turnId": turn_id})
     elif method in ("turn/interrupt", "session/cancel"):
         if method == "session/cancel" and pending_prompt is not None and mode != "ignore-cancel":
             if mode == "slow-cancel":
